@@ -109,7 +109,7 @@ jobs:
           grep -q "v${{ steps.ver.outputs.version }}" selftest.log \
             || echo "::warning::selftest.log 里没看到版本号 ${{ steps.ver.outputs.version }}"
 
-      - name: 打包 zip（exe + tcboot.bin）
+      - name: 打包 zip（exe + tcboot.bin）并准备 Release 附件
         run: python package_release.py dist
 
       - name: 上传 Artifact
@@ -120,6 +120,7 @@ jobs:
           path: |
             dist/*.exe
             dist/*.zip
+            dist/release/SHA256SUMS.txt
             dist/selftest.log
           if-no-files-found: error
 
@@ -145,9 +146,9 @@ jobs:
 
           Windows 单文件 exe，下载后直接双击运行，无需安装 Python。
 
-          - 推荐下载：\`XG-040G-MD一键刷机.zip\`（已含 exe 和 tcboot.bin，解压即用）
-          - 只要 exe：\`XG-040G-MD工具.exe\`（tcboot.bin 已内置，开箱即用）
-          - 校验：见附件 \`SHA256SUMS.txt\`
+          - 推荐下载：\`XG-040G-MD.zip\`（已含 exe 和 tcboot.bin，解压即用）
+          - 只要 exe：\`XG-040G-MD.exe\`（tcboot.bin 已内置，开箱即用）
+          - 校验：见附件 \`SHA256SUMS.txt\`（在解压出来的目录里执行 \`sha256sum -c SHA256SUMS.txt\`）
           - 用法：先把光猫恢复出厂设置（按住 reset 20 秒以上），
             再把铭牌上的账号密码填进界面，按步骤操作即可
           - 详细说明见 [README](https://github.com/${{ github.repository }}#readme)
@@ -155,32 +156,30 @@ jobs:
           > 刷机有风险，请先完整备份。默认模式只开 Telnet / FTP 和备份，不会写入任何分区。
           EOF
 
-          # 顺手给出 sha256，方便用户校验下载是否完整。
-          # Git Bash 一般自带 sha256sum，但为保险起见用 Python 兜底
-          # （前面的步骤已经装了 Python，这条路径一定跑得通）。
-          # 注意：这里用 python -c 而不是 heredoc —— YAML 块标量里
-          # 顶格写的 heredoc 结束符依赖解析器行为，不够稳。
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum *.exe *.zip > SHA256SUMS.txt)
-          else
-            python -c "
-          import glob, hashlib, os
-          lines = []
-          for p in sorted(glob.glob('dist/*.exe') + glob.glob('dist/*.zip')):
-              h = hashlib.sha256(open(p, 'rb').read()).hexdigest()
-              lines.append('%s  %s' % (h, os.path.basename(p)))
-          open('dist/SHA256SUMS.txt', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
-          "
-          fi
-          cat dist/SHA256SUMS.txt
+          # SHA256SUMS.txt 由 package_release.py 生成 —— 它算的是
+          # dist/release/ 里那份**ASCII 名**副本的哈希，正好就是上传到
+          # Release 之后的附件名。所以这里不能自己再 sha256sum 一遍
+          # dist/*.exe（那是中文名），否则用户校验时会找不到文件。
+          cat dist/release/SHA256SUMS.txt
 
-          # 先试创建；已存在（例如手动重跑）就改成覆盖上传
-          gh release create "$TAG" \
-            --title "XG-040G-MD 光猫工具 $TAG" \
-            --notes-file _release_notes.md \
-            dist/*.zip dist/*.exe dist/SHA256SUMS.txt \
-          || gh release upload "$TAG" \
-            dist/*.zip dist/*.exe dist/SHA256SUMS.txt \
-            --clobber
+          # 先试创建；已存在（例如重跑同一个 tag、或修复旧 Release）就改成
+          # 「改说明 + 覆盖附件」，这样重跑 CI 就能把旧 Release 修好。
+          # 注意 gh release upload 不会更新说明文字，必须单独 edit。
+          # 传的是 dist/release/ 下的 ASCII 名副本，不是 dist 里的中文名 ——
+          # GitHub 会把附件名里的非 ASCII 字符直接删掉，与其让它隐式改名，
+          # 不如我们自己定名。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --title "XG-040G-MD 光猫工具 $TAG" \
+              --notes-file _release_notes.md
+            gh release upload "$TAG" \
+              dist/release/XG-040G-MD.zip dist/release/XG-040G-MD.exe dist/release/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG" \
+              --title "XG-040G-MD 光猫工具 $TAG" \
+              --notes-file _release_notes.md \
+              dist/release/XG-040G-MD.zip dist/release/XG-040G-MD.exe dist/release/SHA256SUMS.txt
+          fi
 
           echo "Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"

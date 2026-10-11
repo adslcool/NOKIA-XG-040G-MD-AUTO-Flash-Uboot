@@ -215,8 +215,10 @@ if [ "$RUN_SELFTEST" = "1" ]; then
 fi
 
 # ---------------------------- 8. 打包 zip -----------------------------------
-# 和 CI 用同一个脚本，保证本地和线上产出一致
-log "打包 zip（exe + tcboot.bin）"
+# 和 CI 用同一个脚本，保证本地和线上产出一致。
+# 它除了中文名 zip，还会生成 dist/release/（ASCII 名副本 + SHA256SUMS.txt），
+# 那是给 GitHub Release 用的 —— GitHub 会删掉附件名里的非 ASCII 字符。
+log "打包 zip（exe + tcboot.bin）并准备 Release 附件"
 if [ -f package_release.py ]; then
     python3 package_release.py dist || warn "zip 打包失败（不影响 exe）"
 else
@@ -228,6 +230,7 @@ rm -rf __pycache__ build
 log "完成"
 echo "    产物：$EXE_PATH"
 echo "    用法：把 $EXE_NAME 和 tcboot.bin 放同一目录，双击运行"
+echo "    发版附件：dist/release/（ASCII 名，SHA256SUMS.txt 与之一致）"
 echo
 echo "    提醒：exe 里的 flash.py 是运行时动态加载的，改了 flash.py 需要重新"
 echo "          跑本脚本才会生效；只改 config.ini 则不用重打包。"

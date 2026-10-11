@@ -61,12 +61,19 @@ allow_flash = false
 ### Windows 免安装版
 
 从 [Releases](https://github.com/xe5700/xg-040g-md-auto-flash-uboot/releases)
-下载 `XG-040G-MD一键刷机.zip`（已含 exe 和 tcboot.bin），解压即用。
-也可以只下 `dist/XG-040G-MD工具.exe` 单文件程序（约 13MB），**不需要装 Python**：
+下载 `XG-040G-MD.zip`（已含 exe 和 tcboot.bin），解压即用。
+也可以只下 `XG-040G-MD.exe` 单文件程序（约 15MB），**不需要装 Python**：
 
-1. 把 `XG-040G-MD工具.exe` 和 `tcboot.bin` 放在**同一个目录**；
+1. 把 `XG-040G-MD.exe`（解压出来是 `XG-040G-MD工具.exe`）和 `tcboot.bin`
+   放在**同一个目录**；
 2. 双击运行；
 3. 界面里填好账号密码，点「保存配置」，会在同目录生成 `config.ini`。
+
+> Release 上的附件名是 ASCII（`XG-040G-MD.zip` / `XG-040G-MD.exe`），
+> 因为 GitHub 上传时会**直接删掉文件名里的非 ASCII 字符**。zip 里面
+> 仍然是中文名 `XG-040G-MD工具.exe`，解压后看到的名字不变。
+> 附件 `SHA256SUMS.txt` 里写的也是这两个 ASCII 名，和下载到的文件名一致，
+> 所以 `sha256sum -c SHA256SUMS.txt` 能直接校验通过。
 
 注意：
 - exe 是 64 位 Windows 程序（Win7 及以上）；
@@ -438,6 +445,11 @@ su user_ftp                     → Password: 输入 j3ba73@8
 并顺带用 `package_release.py` 打成 `dist/XG-040G-MD一键刷机.zip`
 （exe + tcboot.bin，就是 Release 上提供的那个包）。
 
+`package_release.py` 还会额外生成 `dist/release/`：里面是 ASCII 名的副本
+（`XG-040G-MD.zip` / `XG-040G-MD.exe`）和与之一致的 `SHA256SUMS.txt`，
+专门给 GitHub Release 用。原因见上文「Windows 免安装版」的说明 ——
+GitHub 会删掉附件名里的非 ASCII 字符，与其让它隐式改名，不如自己先定名。
+
 > 改了 `flash.py` 必须重新跑 `build_exe.sh`：它是运行时动态加载的，
 > 直接替换 exe 同目录的 `flash.py` 也能生效，但想让改动进 exe 就得重打包。
 
@@ -466,8 +478,12 @@ su user_ftp                     → Password: 输入 j3ba73@8
 `.github/workflows/build.yml` 在推 `v*` tag 时自动：
 装 Python 3.11 → 装 `telnetlib3` + `pyinstaller` → `py_compile` 语法检查 →
 PyInstaller 打包 → 检查产物大小 → 跑 `--selftest --quiet` 确认依赖齐全 →
-用 `package_release.py` 打成 zip → 上传 Artifact →
-创建 Release 并附上 zip、exe 与 `SHA256SUMS.txt`。
+用 `package_release.py` 打成 zip 并生成 Release 附件 →
+上传 Artifact → 创建 Release 并附上 `XG-040G-MD.zip`、`XG-040G-MD.exe`
+与 `SHA256SUMS.txt`。
+
+> 如果 tag 对应的 Release 已存在（例如想修一个发错的 Release），
+> CI 会改成**更新说明 + 覆盖附件**，而不是失败。
 
 - tag 与 `version.py` 不一致会直接失败（防止打了 tag 忘了改版本号）；
 - 对 `master` 的普通 push 只打包上传 Artifact，不发 Release；
