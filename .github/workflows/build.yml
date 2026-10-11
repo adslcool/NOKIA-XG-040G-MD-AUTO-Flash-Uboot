@@ -109,6 +109,9 @@ jobs:
           grep -q "v${{ steps.ver.outputs.version }}" selftest.log \
             || echo "::warning::selftest.log 里没看到版本号 ${{ steps.ver.outputs.version }}"
 
+      - name: 打包 zip（exe + tcboot.bin）
+        run: python package_release.py dist
+
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -116,6 +119,7 @@ jobs:
           name: XG-040G-MD-exe-${{ steps.ver.outputs.version }}
           path: |
             dist/*.exe
+            dist/*.zip
             dist/selftest.log
           if-no-files-found: error
 
@@ -141,7 +145,8 @@ jobs:
 
           Windows 单文件 exe，下载后直接双击运行，无需安装 Python。
 
-          - 文件：\`XG-040G-MD工具.exe\`
+          - 推荐下载：\`XG-040G-MD一键刷机.zip\`（已含 exe 和 tcboot.bin，解压即用）
+          - 只要 exe：\`XG-040G-MD工具.exe\`（tcboot.bin 已内置，开箱即用）
           - 校验：见附件 \`SHA256SUMS.txt\`
           - 用法：先把光猫恢复出厂设置（按住 reset 20 秒以上），
             再把铭牌上的账号密码填进界面，按步骤操作即可
@@ -156,12 +161,12 @@ jobs:
           # 注意：这里用 python -c 而不是 heredoc —— YAML 块标量里
           # 顶格写的 heredoc 结束符依赖解析器行为，不够稳。
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+            (cd dist && sha256sum *.exe *.zip > SHA256SUMS.txt)
           else
             python -c "
           import glob, hashlib, os
           lines = []
-          for p in sorted(glob.glob('dist/*.exe')):
+          for p in sorted(glob.glob('dist/*.exe') + glob.glob('dist/*.zip')):
               h = hashlib.sha256(open(p, 'rb').read()).hexdigest()
               lines.append('%s  %s' % (h, os.path.basename(p)))
           open('dist/SHA256SUMS.txt', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
@@ -173,9 +178,9 @@ jobs:
           gh release create "$TAG" \
             --title "XG-040G-MD 光猫工具 $TAG" \
             --notes-file _release_notes.md \
-            dist/*.exe dist/SHA256SUMS.txt \
+            dist/*.zip dist/*.exe dist/SHA256SUMS.txt \
           || gh release upload "$TAG" \
-            dist/*.exe dist/SHA256SUMS.txt \
+            dist/*.zip dist/*.exe dist/SHA256SUMS.txt \
             --clobber
 
           echo "Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"

@@ -77,7 +77,7 @@ done
 
 # ---------------------------- 0. 检查工程文件 -------------------------------
 log "检查工程文件"
-for f in flash.py gui.py config.py version.py build_exe.spec; do
+for f in flash.py gui.py config.py version.py build_exe.spec package_release.py; do
     [ -f "$f" ] || die "缺少 $f，请在本项目根目录运行本脚本"
 done
 ok "flash.py / gui.py / config.py / version.py / build_exe.spec 都在"
@@ -166,7 +166,7 @@ ok "依赖齐全"
 
 # ---------------------------- 5. 语法检查 -----------------------------------
 log "语法检查"
-for f in flash.py gui.py config.py version.py; do
+for f in flash.py gui.py config.py version.py package_release.py; do
     python3 -m py_compile "$f" || die "$f 语法有错"
 done
 rm -rf __pycache__
@@ -212,6 +212,15 @@ if [ "$RUN_SELFTEST" = "1" ]; then
         echo
         sed 's/^/    /' "dist/selftest.log"
     fi
+fi
+
+# ---------------------------- 8. 打包 zip -----------------------------------
+# 和 CI 用同一个脚本，保证本地和线上产出一致
+log "打包 zip（exe + tcboot.bin）"
+if [ -f package_release.py ]; then
+    python3 package_release.py dist || warn "zip 打包失败（不影响 exe）"
+else
+    warn "找不到 package_release.py，跳过 zip 打包"
 fi
 
 # ---------------------------- 收尾 -----------------------------------------

@@ -60,7 +60,9 @@ allow_flash = false
 
 ### Windows 免安装版
 
-`dist/XG-040G-MD工具.exe` 是打包好的单文件程序（约 13MB），**不需要装 Python**：
+从 [Releases](https://github.com/xe5700/xg-040g-md-auto-flash-uboot/releases)
+下载 `XG-040G-MD一键刷机.zip`（已含 exe 和 tcboot.bin），解压即用。
+也可以只下 `dist/XG-040G-MD工具.exe` 单文件程序（约 13MB），**不需要装 Python**：
 
 1. 把 `XG-040G-MD工具.exe` 和 `tcboot.bin` 放在**同一个目录**；
 2. 双击运行；
@@ -432,7 +434,9 @@ su user_ftp                     → Password: 输入 j3ba73@8
 ```
 
 脚本会复用 `_winbuild/` 里已有的 wine 前缀和 Windows Python（该目录不入库，
-但**不要删**——重装很慢）。产物为 `dist/XG-040G-MD工具.exe`。
+但**不要删**——重装很慢）。产物为 `dist/XG-040G-MD工具.exe`，
+并顺带用 `package_release.py` 打成 `dist/XG-040G-MD一键刷机.zip`
+（exe + tcboot.bin，就是 Release 上提供的那个包）。
 
 > 改了 `flash.py` 必须重新跑 `build_exe.sh`：它是运行时动态加载的，
 > 直接替换 exe 同目录的 `flash.py` 也能生效，但想让改动进 exe 就得重打包。
@@ -462,7 +466,8 @@ su user_ftp                     → Password: 输入 j3ba73@8
 `.github/workflows/build.yml` 在推 `v*` tag 时自动：
 装 Python 3.11 → 装 `telnetlib3` + `pyinstaller` → `py_compile` 语法检查 →
 PyInstaller 打包 → 检查产物大小 → 跑 `--selftest --quiet` 确认依赖齐全 →
-上传 Artifact → 创建 Release 并附上 exe 与 `SHA256SUMS.txt`。
+用 `package_release.py` 打成 zip → 上传 Artifact →
+创建 Release 并附上 zip、exe 与 `SHA256SUMS.txt`。
 
 - tag 与 `version.py` 不一致会直接失败（防止打了 tag 忘了改版本号）；
 - 对 `master` 的普通 push 只打包上传 Artifact，不发 Release；
