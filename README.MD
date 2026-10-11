@@ -440,13 +440,17 @@ su user_ftp                     → Password: 输入 j3ba73@8
 ### 发版（自动改版本号 + 打 tag + 触发 CI）
 
 ```bash
-./release.sh patch            # 1.1.0 → 1.1.1（修 bug）
-./release.sh minor            # 1.1.0 → 1.2.0（加功能）
-./release.sh major            # 1.1.0 → 2.0.0（不兼容大改）
+./release.sh patch            # 末位 +1（修 bug）
+./release.sh minor            # 中间位 +1（加功能）
+./release.sh major            # 首位 +1（不兼容大改）
 ./release.sh 1.4.2            # 直接指定版本号
 ./release.sh patch --dry-run  # 只打印要做什么，不落盘
 ./release.sh --current        # 查看当前版本
 ```
+
+> 仓库里有一个早期手工发布的 Release「V2.0」（大写 V，tag 指向还没有
+> `version.py` 的旧提交），所以当前版本号是 `2.1.0`，下次发版即 `v2.1.0`。
+> CI 只认小写 `v*` 标签，手打 `V2.1` 不会触发编译。
 
 脚本会：改 `version.py` → 校验读回一致 → 提交 → 打带注释的 tag → 推送。
 推送后 GitHub Actions 自动编译 exe 并挂到 Release 附件里。

@@ -6,9 +6,9 @@
 #  编译 Windows exe → 把 exe 挂到 Release 上。
 #
 #  用法:
-#      ./release.sh patch              # 1.1.0 → 1.1.1（修 bug）
-#      ./release.sh minor              # 1.1.0 → 1.2.0（加功能）
-#      ./release.sh major              # 1.1.0 → 2.0.0（不兼容大改）
+#      ./release.sh patch              # 末位 +1（修 bug）
+#      ./release.sh minor              # 中间位 +1（加功能）
+#      ./release.sh major              # 首位 +1（不兼容大改）
 #      ./release.sh 1.4.2              # 直接指定版本号
 #      ./release.sh patch --no-push    # 只改+提交+打 tag，不推送
 #      ./release.sh patch -m "说明"    # 自定义 commit / release 说明
@@ -144,14 +144,20 @@ fi
 if [ "$DRY_RUN" -eq 1 ]; then
     echo
     log "${C_YEL}--dry-run：以下动作都不会真的执行${C_RST}"
-    info "1. 把 $VERSION_FILE 里的 VERSION 改成 \"$NEW_VER\""
-    info "2. git add $VERSION_FILE && git commit -m \"release: $TAG\""
-    info "3. git tag -a $TAG -m \"$TAG\""
-    if [ "$NO_PUSH" -eq 1 ]; then
-        info "4. （--no-push）不推送"
+    # 用计数器编号，两条分支（改版本号 / 版本号已一致）的步骤数不同也不会串号
+    _n=1
+    if [ "$NEW_VER" = "$CUR_VER" ]; then
+        info "$((_n++)). 版本号已是 \"$NEW_VER\"，跳过修改 version.py 和提交"
     else
-        info "4. git push origin $BRANCH && git push origin $TAG"
-        info "5. GitHub Actions 自动编译 Windows exe 并挂到 Release $TAG"
+        info "$((_n++)). 把 $VERSION_FILE 里的 VERSION 改成 \"$NEW_VER\""
+        info "$((_n++)). git add $VERSION_FILE && git commit -m \"release: $TAG\""
+    fi
+    info "$((_n++)). git tag -a $TAG -m \"$TAG\""
+    if [ "$NO_PUSH" -eq 1 ]; then
+        info "$((_n++)). （--no-push）不推送"
+    else
+        info "$((_n++)). git push origin $BRANCH && git push origin $TAG"
+        info "$((_n++)). GitHub Actions 自动编译 Windows exe 并挂到 Release $TAG"
     fi
     echo
     ok "dry-run 结束，什么都没改"
@@ -159,8 +165,13 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # ---------- 1. 改版本号 ----------
-log "更新 $VERSION_FILE"
-python3 - "$VERSION_FILE" "$CUR_VER" "$NEW_VER" <<'PY'
+# 目标版本号与当前一致时（例如 version.py 已经提到 2.1.0，现在要正式发 v2.1.0），
+# 不改文件也不提交 —— 否则 git commit 会因「没有改动」而失败。
+if [ "$NEW_VER" = "$CUR_VER" ]; then
+    log "版本号已经是 $CUR_VER，跳过修改和提交，直接给当前提交打 tag"
+else
+    log "更新 $VERSION_FILE"
+    python3 - "$VERSION_FILE" "$CUR_VER" "$NEW_VER" <<'PY'
 import re
 import sys
 
@@ -176,19 +187,20 @@ src = pat.sub('VERSION = "%s"' % new, src, count=1)
 open(path, "w", encoding="utf-8").write(src)
 print("    VERSION: %s -> %s" % (old, new))
 PY
-ok "版本号已更新"
+    ok "版本号已更新"
 
-# 立刻校验，改错了就回滚，别把坏版本提交上去
-GOT="$(python3 -c "import version; print(version.VERSION)" 2>/dev/null || echo "")"
-[ "$GOT" = "$NEW_VER" ] || { git checkout -- "$VERSION_FILE"; die "改完后读回来是 '$GOT'，不是 '$NEW_VER'，已回滚"; }
-ok "校验通过（import version → $GOT）"
+    # 立刻校验，改错了就回滚，别把坏版本提交上去
+    GOT="$(python3 -c "import version; print(version.VERSION)" 2>/dev/null || echo "")"
+    [ "$GOT" = "$NEW_VER" ] || { git checkout -- "$VERSION_FILE"; die "改完后读回来是 '$GOT'，不是 '$NEW_VER'，已回滚"; }
+    ok "校验通过（import version → $GOT）"
 
-# ---------- 2. 提交 ----------
-log "提交"
-COMMIT_MSG="${MSG:-release: $TAG}"
-git add "$VERSION_FILE"
-git commit -m "$COMMIT_MSG"
-ok "已提交: $(git log -1 --format='%h %s')"
+    # ---------- 2. 提交 ----------
+    log "提交"
+    COMMIT_MSG="${MSG:-release: $TAG}"
+    git add "$VERSION_FILE"
+    git commit -m "$COMMIT_MSG"
+    ok "已提交: $(git log -1 --format='%h %s')"
+fi
 
 # ---------- 3. 打 tag ----------
 log "打 tag"
