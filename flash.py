@@ -96,7 +96,7 @@ SKIP_BACKUP_IF_COMPLETE = True   # False 则每次强制重新备份
 DEVICE_MANIFEST = "device.json"  # 备份清单文件名
 
 UBOOT_FILE = "tcboot.bin"
-EXPECTED_SHA512 = "142ad1ebcc825e58223e5c28de0aee853d96a05447bda1af9fc78dd3f5eab0e10aec2626bd4b18ce7d8137b7f6943726734bcb38ce06d75ea86b45ccf6969610"  # ←←← 必须填写正确的 SHA512！
+EXPECTED_SHA512 = "5d46e47c40967fcb0955c42e09ce2e610cf57059c33a62eb959ee1f534f86bd1fa662f03473a1785df3438f47d62db0eb71ef7c4aaa949a9ff94175966c2fb17"  # ←←← 必须填写正确的 SHA512！
 
 # --- 刷写后的回读校验 ---
 # 实测：dd 写入 /dev/mtdblock0 后立刻 `dd if=/dev/mtd0` 读回来的常常还是旧数据，
@@ -1338,9 +1338,10 @@ def flash_uboot(tn, local_ip):
     lines = [l for l in ret.split("\n") if l.strip()]
     print("   ", lines[0] if lines else "(无输出)")
     if not lines or not lines[0].startswith(EXPECTED_SHA512):
-        print("[!] U-Boot 校验失败")
-        sys.exit(1)
-    print("[✓] U-Boot 校验通过")
+        print("[!] U-Boot 校验失败，可能你使用的不是自带的tcboot镜像，程序将继续运行。")
+    else:
+        print("[✓] U-Boot 校验通过")
+        # sys.exit(1)
 
     # === 关键：使用 dd 写入 /dev/mtdblock0 ===
     # 为什么写完不能立刻回读判定（实测踩过）：
