@@ -83,14 +83,20 @@ jobs:
         shell: bash
         run: |
           cd dist
-          # exe 是 GUI 子系统程序，从 shell 调用时退出码不一定可靠，
-          # 所以以 selftest.log 的内容为准。--quiet 让它失败时也不弹窗
-          # （弹窗会在无人值守的 CI 上把流程挂住）。
+          rm -f selftest.log
+          # exe 是 GUI 子系统程序，从 shell 调用时不一定等它结束，
+          # 所以不能只看退出码 —— 轮询等 selftest.log 出现。
+          # --quiet 让它失败时也不弹窗（弹窗会在无人值守的 CI 上挂住流程）。
           ./XG-040G-MD*.exe --selftest --quiet || true
+          for i in $(seq 1 30); do
+            [ -s selftest.log ] && break
+            sleep 1
+          done
 
           echo "----- selftest.log -----"
-          if [ ! -f selftest.log ]; then
+          if [ ! -s selftest.log ]; then
             echo "::error::exe 没有生成 selftest.log，说明它根本没跑起来"
+            ls -la
             exit 1
           fi
           cat selftest.log
