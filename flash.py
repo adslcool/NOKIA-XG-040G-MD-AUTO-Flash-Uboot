@@ -221,14 +221,24 @@ def apply_mtd_table(table):
     MTD_SIZES = {p["index"]: p["size"] for p in MTD_TABLE}
     return True
 
+def _safe_mtd_name(name):
+    """把分区名清理成可安全用作文件名/URL 路径的形式。
+
+    /proc/mtd 里的名字来自设备固件，正常都是 `bootloader` 这种标识符，但万一
+    出现空格、斜杠或引号，直接用会同时破坏**本地文件名**和**设备侧 curl 的
+    URL**（那条命令是未加引号拼进 shell 的）。所以统一把不安全字符换成 `_`。
+    """
+    return re.sub(r'[^A-Za-z0-9._-]', '_', name or "") or "unknown"
+
 def _mtd_pairs():
     """返回 [(分区号, 名字), ...]：优先用实时读到的 MTD_TABLE，否则用默认表。
 
     用真实分区号而不是 enumerate 的下标，避免分区号不连续时文件名错位。
+    名字经 _safe_mtd_name 清理，保证能安全用作文件名与 URL 路径。
     """
     if MTD_TABLE:
-        return [(p["index"], p["name"]) for p in MTD_TABLE]
-    return list(enumerate(MTD_PARTITIONS))
+        return [(p["index"], _safe_mtd_name(p["name"])) for p in MTD_TABLE]
+    return [(i, _safe_mtd_name(n)) for i, n in enumerate(MTD_PARTITIONS)]
 
 def format_mtd_table(table):
     """把分区表格式化成人类可读的多行文本。"""
