@@ -191,16 +191,26 @@ ok "已生成 $EXE_PATH（$(stat -c%s "$EXE_PATH" 2>/dev/null || stat -f%z "$EXE
 if [ "$RUN_SELFTEST" = "1" ]; then
     log "运行 exe 自检"
     rm -f "dist/selftest.log"
-    if ( cd dist && timeout "$SELFTEST_TIMEOUT" wine "$EXE_NAME" --selftest --quiet >/dev/null 2>&1 ); then
+
+    # exe 是 GUI 子系统程序，从 shell 调用时退出码不一定可靠 ——
+    # 所以以 selftest.log 的内容为准，轮询等它写出来。
+    ( cd dist && timeout "$SELFTEST_TIMEOUT" wine "$EXE_NAME" --selftest --quiet >/dev/null 2>&1 ) || true
+    for _ in $(seq 1 30); do
+        [ -s "dist/selftest.log" ] && break
+        sleep 1
+    done
+
+    if [ ! -s "dist/selftest.log" ]; then
+        warn "没有生成 selftest.log —— exe 可能根本没跑起来"
+    elif grep -q "自检通过" "dist/selftest.log"; then
         ok "自检通过"
     else
-        warn "自检未通过或超时（不影响 exe 生成，但建议看一下下面的日志）"
+        warn "自检未通过（多半是漏了 hiddenimports）"
     fi
+
     if [ -f "dist/selftest.log" ]; then
         echo
         sed 's/^/    /' "dist/selftest.log"
-    else
-        warn "没有生成 selftest.log"
     fi
 fi
 
