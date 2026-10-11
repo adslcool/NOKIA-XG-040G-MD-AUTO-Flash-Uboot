@@ -150,8 +150,24 @@ jobs:
           > 刷机有风险，请先完整备份。默认模式只开 Telnet / FTP 和备份，不会写入任何分区。
           EOF
 
-          # 顺手给出 sha256，方便用户校验下载是否完整
-          (cd dist && sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          # 顺手给出 sha256，方便用户校验下载是否完整。
+          # Git Bash 一般自带 sha256sum，但为保险起见用 Python 兜底
+          # （前面的步骤已经装了 Python，这条路径一定跑得通）。
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum *.exe > SHA256SUMS.txt)
+          else
+            python - <<'PY'
+          import glob, hashlib, os
+          lines = []
+          for p in sorted(glob.glob(os.path.join("dist", "*.exe"))):
+              with open(p, "rb") as f:
+                  h = hashlib.sha256(f.read()).hexdigest()
+              lines.append("%s  %s" % (h, os.path.basename(p)))
+          with open(os.path.join("dist", "SHA256SUMS.txt"), "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          PY
+          fi
+          cat dist/SHA256SUMS.txt
 
           # 先试创建；已存在（例如手动重跑）就改成覆盖上传
           gh release create "$TAG" \
