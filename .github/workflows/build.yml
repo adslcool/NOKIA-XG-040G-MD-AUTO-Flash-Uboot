@@ -153,19 +153,19 @@ jobs:
           # 顺手给出 sha256，方便用户校验下载是否完整。
           # Git Bash 一般自带 sha256sum，但为保险起见用 Python 兜底
           # （前面的步骤已经装了 Python，这条路径一定跑得通）。
+          # 注意：这里用 python -c 而不是 heredoc —— YAML 块标量里
+          # 顶格写的 heredoc 结束符依赖解析器行为，不够稳。
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum *.exe > SHA256SUMS.txt)
           else
-            python - <<'PY'
+            python -c "
           import glob, hashlib, os
           lines = []
-          for p in sorted(glob.glob(os.path.join("dist", "*.exe"))):
-              with open(p, "rb") as f:
-                  h = hashlib.sha256(f.read()).hexdigest()
-              lines.append("%s  %s" % (h, os.path.basename(p)))
-          with open(os.path.join("dist", "SHA256SUMS.txt"), "w", encoding="utf-8") as f:
-              f.write("\n".join(lines) + "\n")
-          PY
+          for p in sorted(glob.glob('dist/*.exe')):
+              h = hashlib.sha256(open(p, 'rb').read()).hexdigest()
+              lines.append('%s  %s' % (h, os.path.basename(p)))
+          open('dist/SHA256SUMS.txt', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+          "
           fi
           cat dist/SHA256SUMS.txt
 
