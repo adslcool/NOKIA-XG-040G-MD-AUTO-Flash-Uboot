@@ -33,6 +33,14 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          # 必须拿全历史：更新日志是 changelog.py 从 git log 里生成的，
+          # 默认的 fetch-depth: 1 只拿到一个提交，也看不到历史 tag，
+          # 结果会是「本次没有需要记录的改动」。
+          fetch-depth: 0
+          # 还要显式取 tag —— changelog.py 靠 git describe 找上一个版本，
+          # 少了 tag 就会退化成「列出全部提交」，每个版本都刷一遍旧日志。
+          fetch-tags: true
 
       - name: 安装 Python
         uses: actions/setup-python@v5
@@ -53,7 +61,7 @@ jobs:
           python -m pip install telnetlib3 pyinstaller
 
       - name: 语法检查
-        run: python -m py_compile flash.py gui.py config.py version.py
+        run: python -m py_compile flash.py gui.py config.py version.py changelog.py package_release.py
 
       - name: 打包 exe
         run: python -m PyInstaller --clean --noconfirm build_exe.spec
@@ -155,6 +163,20 @@ jobs:
 
           > 刷机有风险，请先完整备份。默认模式只开 Telnet / FTP 和备份，不会写入任何分区。
           EOF
+
+          # 把自动生成的更新日志接在后面。
+          # 生成失败（例如浅克隆看不到历史）不该让发版挂掉 —— 那样反而发不出去，
+          # 所以失败就只警告一句，说明文字少一段而已。
+          if python changelog.py "$TAG" > _changelog.md 2>_changelog.err; then
+            printf '\n---\n\n' >> _release_notes.md
+            cat _changelog.md >> _release_notes.md
+            echo "----- 更新日志 -----"
+            cat _changelog.md
+            echo "--------------------"
+          else
+            echo "::warning::更新日志生成失败，Release 说明里将不含更新日志"
+            sed 's/^/    /' _changelog.err || true
+          fi
 
           # SHA256SUMS.txt 由 package_release.py 生成 —— 它算的是
           # dist/release/ 里那份**ASCII 名**副本的哈希，正好就是上传到

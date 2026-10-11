@@ -160,6 +160,19 @@ if [ "$DRY_RUN" -eq 1 ]; then
         info "$((_n++)). GitHub Actions 自动编译 Windows exe 并挂到 Release $TAG"
     fi
     echo
+
+    # 顺带预览一下 Release 里会出现的更新日志（CI 用 changelog.py 生成）
+    if [ -f changelog.py ]; then
+        log "本次 Release 的更新日志预览"
+        # tag 还没建（dry-run 里必然如此），退回用 HEAD 预览 ——
+        # 两者差的就是那个 release 提交，而它本来就不进更新日志。
+        if ! python3 changelog.py "$TAG" 2>/dev/null; then
+            if ! python3 changelog.py HEAD 2>/dev/null; then
+                warn "生成失败（可能还没有任何提交可列）"
+            fi
+        fi
+    fi
+    echo
     ok "dry-run 结束，什么都没改"
     exit 0
 fi

@@ -77,10 +77,10 @@ done
 
 # ---------------------------- 0. 检查工程文件 -------------------------------
 log "检查工程文件"
-for f in flash.py gui.py config.py version.py build_exe.spec package_release.py; do
+for f in flash.py gui.py config.py version.py build_exe.spec package_release.py changelog.py; do
     [ -f "$f" ] || die "缺少 $f，请在本项目根目录运行本脚本"
 done
-ok "flash.py / gui.py / config.py / version.py / build_exe.spec 都在"
+ok "flash.py / gui.py / config.py / version.py / build_exe.spec / package_release.py / changelog.py 都在"
 
 # ---------------------------- 1. 检查 wine ----------------------------------
 log "检查 wine"
@@ -166,7 +166,7 @@ ok "依赖齐全"
 
 # ---------------------------- 5. 语法检查 -----------------------------------
 log "语法检查"
-for f in flash.py gui.py config.py version.py package_release.py; do
+for f in flash.py gui.py config.py version.py package_release.py changelog.py; do
     python3 -m py_compile "$f" || die "$f 语法有错"
 done
 rm -rf __pycache__

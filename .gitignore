@@ -26,5 +26,12 @@ _test_verify_loop.py
 _devmgmt.html
 .playwright-mcp
 
+# CI / 本地发版时生成的 Release 说明与更新日志片段
+_release_notes.md
+_changelog.md
+_changelog.err
+_relstep.sh
+_stub/
+
 # 恩山发帖草稿（含个人下载链接，不入库）
 恩山发帖.md

@@ -471,7 +471,47 @@ GitHub 会删掉附件名里的非 ASCII 字符，与其让它隐式改名，不
 脚本会：改 `version.py` → 校验读回一致 → 提交 → 打带注释的 tag → 推送。
 推送后 GitHub Actions 自动编译 exe 并挂到 Release 附件里。
 
+`--dry-run` 还会顺带打印**本次 Release 的更新日志预览**，
+让你在推送前就能看到会写进 Release 说明的内容。
+
 > 发版前工作区必须是干净的（脚本会检查），否则 tag 会指向一个不含改动的提交。
+
+### 更新日志是自动生成的
+
+Release 说明里的「更新日志」由 `changelog.py` 从 git 历史生成，
+按提交前缀（`feat` / `fix` / `docs` / `ci` …）分组：
+
+```bash
+python3 changelog.py              # 当前 HEAD 到最近一个 tag 之间的提交
+python3 changelog.py v2.1.0       # 指定 tag（CI 里传 $GITHUB_REF_NAME）
+python3 changelog.py --range      # 只打印用到的提交区间，便于排查
+```
+
+所以**提交信息的前缀直接影响更新日志**：
+
+| 前缀 | 归到哪一组 |
+| --- | --- |
+| `feat:` | 新功能 |
+| `fix:` | 修复 |
+| `perf:` | 性能优化 |
+| `refactor:` | 重构 |
+| `docs:` | 文档 |
+| `test:` | 测试 |
+| `ci:` / `build:` | 构建 / CI |
+| 其它 / 没有前缀 | 其他改动 |
+
+几个刻意的设计：
+
+- 认不出前缀的提交**不会丢**，一律进「其他改动」——历史里那些
+  `Update README.MD` 之类的老提交也能正常显示；
+- `release.sh` 自动产生的 `release: vX.Y.Z` 提交只是改版本号，
+  对用户没意义，会被跳过；
+- 上一个 tag 用 `git describe` 找，找不到（首次发版）就列出全部提交；
+- 生成失败**不会让发版挂掉**，只是 Release 说明里少这一段（CI 里发警告）。
+
+> 因此 CI 的 `actions/checkout` 必须 `fetch-depth: 0` + `fetch-tags: true` ——
+> 否则浅克隆里既看不到历史提交也看不到 tag，更新日志会变成空白。
+> 这也是为什么每次发版前建议用规范的提交前缀写 commit message。
 
 ### GitHub Actions
 
@@ -479,8 +519,8 @@ GitHub 会删掉附件名里的非 ASCII 字符，与其让它隐式改名，不
 装 Python 3.11 → 装 `telnetlib3` + `pyinstaller` → `py_compile` 语法检查 →
 PyInstaller 打包 → 检查产物大小 → 跑 `--selftest --quiet` 确认依赖齐全 →
 用 `package_release.py` 打成 zip 并生成 Release 附件 →
-上传 Artifact → 创建 Release 并附上 `XG-040G-MD.zip`、`XG-040G-MD.exe`
-与 `SHA256SUMS.txt`。
+上传 Artifact → 用 `changelog.py` 生成更新日志 → 创建 Release 并附上
+`XG-040G-MD.zip`、`XG-040G-MD.exe` 与 `SHA256SUMS.txt`。
 
 > 如果 tag 对应的 Release 已存在（例如想修一个发错的 Release），
 > CI 会改成**更新说明 + 覆盖附件**，而不是失败。
