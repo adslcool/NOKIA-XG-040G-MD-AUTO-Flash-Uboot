@@ -501,7 +501,9 @@ def self_test():
             spec = importlib.util.spec_from_file_location("flash_selftest", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            print(f"  [✓] flash.py 加载成功（{len(mod.MTD_PARTITIONS)} 个分区定义）")
+            print(f"  [✓] flash.py 加载成功"
+                  f"（内置回退分区表 {len(mod.MTD_PARTITIONS)} 个，"
+                  f"运行时以设备 /proc/mtd 为准）")
         except Exception as e:
             problems.append(f"flash.py 加载失败: {type(e).__name__}: {e}")
             print(f"  [✗] flash.py — {type(e).__name__}: {e}")

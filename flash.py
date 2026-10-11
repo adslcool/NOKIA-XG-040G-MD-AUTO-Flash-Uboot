@@ -5,7 +5,7 @@
     python3 flash.py                      # 使用配置区 MODE 的默认模式
     python3 flash.py --mode telnet        # 仅自动开启 Telnet，最安全（不碰 FTP）
     python3 flash.py --mode ftp           # 仅自动开启 FTP（su 提权用，不备份）
-    python3 flash.py --mode backup        # 开启 Telnet+FTP + 备份 mtd0-mtd16（不写入）
+    python3 flash.py --mode backup        # 开启 Telnet+FTP + 备份全部分区（不写入）
     python3 flash.py --mode flash         # 开启 Telnet+FTP + 备份 + 刷写 U-Boot（危险）
     python3 flash.py --mode flash -y      # 跳过刷写前的 YES 二次确认
     python3 flash.py --no-enable-telnet   # 假定 Telnet 已手动开启，不走网页步骤
@@ -67,7 +67,7 @@ ROOT_PASSWORD = PASSWORD         # su user_ftp 的密码就是 telnet 登录密�
 
 # ---------- 运行模式（安全优先：默认不刷机）----------
 # "telnet"  仅自动开启 Telnet，最安全，什么都不写
-# "backup"  开启 Telnet + 备份全部分区（mtd0-mtd16），不写入
+# "backup"  开启 Telnet + 备份全部分区（分区表实时从设备读取），不写入
 # "flash"   开启 Telnet + 备份 + 刷写 U-Boot 到 mtd0（危险）
 MODE = "backup"
 # 命令行可覆盖：python3 flash.py --mode telnet|backup|flash
@@ -111,11 +111,23 @@ BACKUP_FIRMWARE = True
 STATIC_LOCAL_IP = "192.168.1.1"
 # ===========================================
 
+# --- MTD 分区表 ---
+# 注意：下面这两张表是**回退默认值**（XG-040G-MD / XG-140G-MD 实测），
+# 只在读不到设备 /proc/mtd 时才使用。
+#
+# 正常流程会先 `cat /proc/mtd` 实时解析出本机真实的分区表（见 read_mtd_table /
+# apply_mtd_table），因为不同机型/固件的分区**数量和大小都不一样**：
+# 写死会导致其它机型（例如 XG-040G-TF）备份失败或大小校验误报。
 MTD_PARTITIONS = [
     "bootloader", "romfile", "kernel", "rootfs", "kernel_slave", "rootfs_slave",
     "bosa", "ri", "flag", "flagback", "config", "data", "oopsfs", "log",
     "nsb_master", "nsb_slave", "all_flash"
 ]
+
+# 运行时从设备读到的分区表，形如
+#   [{"index": 0, "name": "bootloader", "size": 524288, "erasesize": 131072}, ...]
+# 为空表示尚未读取（此时用上面的内置默认表）。
+MTD_TABLE = []
 
 # 各分区字节数（取自本机 `cat /proc/mtd` 实测，2026-10-04）
 # 用途：给备份超时一个按分区大小的合理上界，并校验备份文件完整性。
@@ -138,6 +150,92 @@ MTD_SIZES = {
     15: 0x02880000,   # nsb_slave       40.5 MiB
     16: 0x0eba0000,   # all_flash       235.6 MiB
 }
+
+# 内置默认表的快照：apply_mtd_table() 会覆盖 MTD_PARTITIONS / MTD_SIZES，
+# 保留一份原始副本，好在解析失败时能真正回退回去（而不是退回被改过的值）。
+_DEFAULT_MTD_PARTITIONS = list(MTD_PARTITIONS)
+_DEFAULT_MTD_SIZES = dict(MTD_SIZES)
+
+# `cat /proc/mtd` 的一行，例如：
+#   mtd0: 00080000 00020000 "bootloader"
+# 分组：1=分区号(十进制)  2=大小(十六进制)  3=擦除块大小(十六进制)  4=名字
+_MTD_LINE_RE = re.compile(
+    r'^\s*mtd(\d+)\s*:\s*([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(.*?)\s*$')
+
+def parse_mtd_table(text):
+    """把 `cat /proc/mtd` 的输出解析成分区表（纯函数，不碰设备，可离线测试）。
+
+    busybox 1.16 / Linux 5.4 上的典型输出::
+
+        dev:    size   erasesize  name
+        mtd0: 00080000 00020000 "bootloader"
+        mtd1: 00040000 00020000 "romfile"
+
+    返回按分区号升序的列表::
+
+        [{"index": 0, "name": "bootloader", "size": 524288, "erasesize": 131072}, ...]
+
+    解析不到任何行时返回 []，调用方据此回退到内置默认表。
+    """
+    table = []
+    for line in (text or "").splitlines():
+        m = _MTD_LINE_RE.match(line)
+        if not m:
+            continue                      # 表头 / 提示符 / 回显等，跳过
+        table.append({
+            "index": int(m.group(1)),
+            "size": int(m.group(2), 16),
+            "erasesize": int(m.group(3), 16),
+            "name": m.group(4).strip().strip('"'),
+        })
+    table.sort(key=lambda p: p["index"])
+    return table
+
+def read_mtd_table(tn):
+    """从设备读取真实分区表并解析；读不到时返回 []。"""
+    drain(tn)
+    tn.write(b"cat /proc/mtd\n")
+    out = read_until_prompt(tn, ["#".encode()], timeout=30)
+    return parse_mtd_table(out)
+
+def apply_mtd_table(table):
+    """用实时读到的分区表覆盖模块级的 MTD_PARTITIONS / MTD_SIZES / MTD_TABLE。
+
+    覆盖后 backup_all_partitions / verify_backup_complete / _expected_size
+    都按**本机真实**的分区数量和大小工作，不再受写死的默认表限制。
+
+    为什么必须实时读：不同机型/固件的分区布局不一样。写死会让其它机型
+    （例如 XG-040G-TF）在备份时因「大小与 MTD_SIZES 不符」直接中止。
+
+    table 为空（设备没有 /proc/mtd 或解析失败）时返回 False，并把两张表
+    恢复成内置默认值 —— 避免残留上一次（可能是别的机型）的解析结果。
+    """
+    global MTD_PARTITIONS, MTD_SIZES, MTD_TABLE
+    if not table:
+        MTD_TABLE = []
+        MTD_PARTITIONS = list(_DEFAULT_MTD_PARTITIONS)
+        MTD_SIZES = dict(_DEFAULT_MTD_SIZES)
+        return False
+    MTD_TABLE = list(table)
+    MTD_PARTITIONS = [p["name"] for p in MTD_TABLE]
+    MTD_SIZES = {p["index"]: p["size"] for p in MTD_TABLE}
+    return True
+
+def _mtd_pairs():
+    """返回 [(分区号, 名字), ...]：优先用实时读到的 MTD_TABLE，否则用默认表。
+
+    用真实分区号而不是 enumerate 的下标，避免分区号不连续时文件名错位。
+    """
+    if MTD_TABLE:
+        return [(p["index"], p["name"]) for p in MTD_TABLE]
+    return list(enumerate(MTD_PARTITIONS))
+
+def format_mtd_table(table):
+    """把分区表格式化成人类可读的多行文本。"""
+    return "\n".join(
+        f"    mtd{p['index']:<2} {p['name']:<16} {p['size']:>10} 字节"
+        f" ({p['size'] / 1024 / 1024:.1f} MiB)"
+        for p in table)
 
 def sha512sum(filepath):
     h = hashlib.sha512()
@@ -802,7 +900,7 @@ def telnet_login(reenter_only=False):
 # ---------- 临时 HTTP 文件服务器（替代 nc）----------
 # 为什么不用 nc：nc 需要主机侧**精确卡时间**先起监听、设备才敢连，任一环节慢
 # 一拍就丢数据（实测表现为备份文件 0 字节）；而且每个分区都要重新起一次监听，
-# 17 个分区就是 17 次竞态。HTTP 是请求-响应模型，没有竞态，curl 还自带重试与
+# 每个分区就是一次竞态。HTTP 是请求-响应模型，没有竞态，curl 还自带重试与
 # 断点续传。设备上实测有 curl 7.77.0（/sbin/curl，支持 http/https/ftp/tftp），
 # 所以这里只依赖设备侧 curl，主机侧用标准库起一个临时服务器即可。
 import posixpath
@@ -1081,8 +1179,11 @@ def verify_backup_complete(backup_dir, info):
 
     判定标准（全部满足才算完整）：
       1) device.json 存在，且其中 SerialNumber 与当前设备一致；
-      2) 17 个分区文件全部存在，大小与清单及 MTD_SIZES 三方吻合；
+      2) 分区文件全部存在，大小与清单及**本机实时分区表**三方吻合；
       3) 每个文件的 SHA256 与清单记录一致（逐字节校验）。
+
+    注意第 2 条用的是运行时从设备读到的真实分区表（MTD_TABLE），
+    不是写死的默认表 —— 否则换机型会误判「大小不符」。
     """
     manifest = load_manifest(backup_dir)
     if not manifest:
@@ -1095,9 +1196,10 @@ def verify_backup_complete(backup_dir, info):
         return False, f"序列号不同（清单 {old_sn} / 当前 {new_sn}）"
 
     files = manifest.get("files") or {}
-    if len(files) < len(MTD_PARTITIONS):
-        return False, f"清单只记录了 {len(files)}/{len(MTD_PARTITIONS)} 个分区"
-    for i, name in enumerate(MTD_PARTITIONS):
+    pairs = _mtd_pairs()
+    if len(files) < len(pairs):
+        return False, f"清单只记录了 {len(files)}/{len(pairs)} 个分区"
+    for i, name in pairs:
         fname = f"mtd{i}_{name}.bin"
         rec = files.get(fname)
         if not rec:
@@ -1110,7 +1212,7 @@ def verify_backup_complete(backup_dir, info):
             return False, f"{fname} 大小不符（{size} != 清单 {rec.get('size')}）"
         expected = MTD_SIZES.get(i)
         if expected and size != expected:
-            return False, f"{fname} 大小与 MTD_SIZES 不符（{size} != {expected}）"
+            return False, f"{fname} 大小与本机分区表不符（{size} != {expected}）"
         if _sha256sum(fpath) != rec.get("sha256"):
             return False, f"{fname} SHA256 校验失败（文件可能损坏）"
     return True, f"序列号 {new_sn} 的备份完整且校验通过"
@@ -1153,7 +1255,7 @@ def backup_all_partitions(tn, local_ip, backup_dir):
                         allow_ip=ROUTER_IP, port=LOCAL_HTTP_PORT) as srv:
         print(f"[*] 主机临时 HTTP 服务器: http://{local_ip}:{LOCAL_HTTP_PORT}")
         print("[*] 开始备份所有 MTD 分区（使用 dd + curl 上传）...")
-        for i, name in enumerate(MTD_PARTITIONS):
+        for i, name in _mtd_pairs():
             fname = f"mtd{i}_{name}.bin"
             filepath = os.path.join(backup_dir, fname)
             print(f"  → 备份 mtd{i} ({name}) ...")
@@ -1189,7 +1291,7 @@ def backup_all_partitions(tn, local_ip, backup_dir):
     print("[*] 计算各分区 SHA256 并写入设备清单（用于下次跳过备份）...")
     info = collect_device_info(tn)
     files = {}
-    for i, name in enumerate(MTD_PARTITIONS):
+    for i, name in _mtd_pairs():
         fname = f"mtd{i}_{name}.bin"
         fpath = os.path.join(backup_dir, fname)
         if os.path.isfile(fpath):
@@ -1200,7 +1302,7 @@ def backup_all_partitions(tn, local_ip, backup_dir):
     print(f"[✓] 设备信息: {model} / SN {sn}")
 
 def _expected_size(idx: int) -> int:
-    """从 MTD_SIZES 取该分区的期望字节数；未知则给一个宽松的默认值。"""
+    """取该分区的期望字节数（优先实时分区表）；未知则给一个宽松的默认值。"""
     return MTD_SIZES.get(idx, 16 * 1024 * 1024)
 
 def flash_uboot(tn, local_ip):
@@ -1402,10 +1504,17 @@ def run_flow(args, confirm_flash=None):
     # === 4. Telnet 登录 ===
     tn = telnet_login()
 
-    # 显示分区表
-    tn.write(b"cat /proc/mtd\n")
-    ret = read_until_prompt(tn, ["#".encode()], timeout=30)
-    print(ret)
+    # === 4b. 读取设备真实分区表 ===
+    # 必须在备份之前读：不同机型/固件的分区数量与大小都不一样，写死默认表
+    # 会让其它机型（例如 XG-040G-TF）因大小校验不符而备份失败。
+    live_table = read_mtd_table(tn)
+    if apply_mtd_table(live_table):
+        print(f"[*] 已从设备读取分区表：共 {len(live_table)} 个分区")
+        print(format_mtd_table(live_table))
+    else:
+        print("[!] 未能从 /proc/mtd 解析出分区表，回退到内置默认表"
+              f"（{len(MTD_PARTITIONS)} 个分区）。")
+        print("[!] 若本机分区布局与默认表不同，备份可能失败，请把上面的输出反馈给作者。")
 
     backup_dir_used = None
 
