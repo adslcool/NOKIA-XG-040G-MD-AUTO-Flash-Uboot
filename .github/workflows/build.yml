@@ -1,0 +1,159 @@
+name: Build Windows EXE
+
+# 触发时机：
+#   1. 推 v* 标签（例如 v1.2.0）—— 自动编译并把 exe 挂到 Release 附件里
+#   2. 对 master 的 push —— 只做「打包 + 自检 + 上传 Artifact」的冒烟测试，不发 Release
+#   3. 手动触发（Actions 页面点 Run workflow）—— 同 2
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+  workflow_dispatch:
+
+# 同一分支/tag 只跑一个，新推送取消旧的
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write      # 发 Release 需要写权限
+
+env:
+  # Windows 上的 bash 按 UTF-8 处理文件名，避免中文 exe 名被搞乱
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
+jobs:
+  build:
+    name: 编译 Windows exe
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 读取版本号
+        id: ver
+        shell: bash
+        run: |
+          VER="$(python -c "import version; print(version.VERSION)")"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "版本号: $VER"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install telnetlib3 pyinstaller
+
+      - name: 语法检查
+        run: python -m py_compile flash.py gui.py config.py version.py
+
+      - name: 打包 exe
+        run: python -m PyInstaller --clean --noconfirm build_exe.spec
+
+      - name: 检查产物
+        shell: bash
+        run: |
+          set -e
+          # 用通配符拿文件名，而不是把中文名写死在脚本里 ——
+          # 免得 shell 的编码差异把路径搞坏
+          EXE="$(ls dist/*.exe | head -1)"
+          if [ -z "$EXE" ] || [ ! -f "$EXE" ]; then
+            echo "::error::没有生成 exe"
+            ls -la dist/ || true
+            exit 1
+          fi
+          SIZE="$(wc -c < "$EXE" | tr -d ' ')"
+          echo "产物: $EXE"
+          echo "大小: $SIZE 字节"
+          # 太小说明 PyInstaller 没把东西打进去（正常 13~15MB）
+          if [ "$SIZE" -lt 5000000 ]; then
+            echo "::error::exe 只有 $SIZE 字节，明显不完整"
+            exit 1
+          fi
+
+      - name: 自检（确认依赖齐全）
+        shell: bash
+        run: |
+          cd dist
+          # exe 是 GUI 子系统程序，从 shell 调用时退出码不一定可靠，
+          # 所以以 selftest.log 的内容为准。--quiet 让它失败时也不弹窗
+          # （弹窗会在无人值守的 CI 上把流程挂住）。
+          ./XG-040G-MD*.exe --selftest --quiet || true
+
+          echo "----- selftest.log -----"
+          if [ ! -f selftest.log ]; then
+            echo "::error::exe 没有生成 selftest.log，说明它根本没跑起来"
+            exit 1
+          fi
+          cat selftest.log
+          echo "------------------------"
+
+          if ! grep -q "自检通过" selftest.log; then
+            echo "::error::exe 自检未通过（多半是漏了 hiddenimports）"
+            exit 1
+          fi
+          grep -q "v${{ steps.ver.outputs.version }}" selftest.log \
+            || echo "::warning::selftest.log 里没看到版本号 ${{ steps.ver.outputs.version }}"
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact 名用 ASCII，避免各平台解压工具对中文名的兼容问题
+          name: XG-040G-MD-exe-${{ steps.ver.outputs.version }}
+          path: |
+            dist/*.exe
+            dist/selftest.log
+          if-no-files-found: error
+
+      # 只有推 tag 才发 Release；分支 push 和手动触发都跳过
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          VER="${{ steps.ver.outputs.version }}"
+
+          # 校验 tag 与 version.py 一致，防止打了 tag 忘了改版本号
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error::tag 是 $TAG，但 version.py 里是 v$VER —— 请用 ./release.sh 发版"
+            exit 1
+          fi
+
+          cat > _release_notes.md <<EOF
+          ## XG-040G-MD 光猫工具 $TAG
+
+          Windows 单文件 exe，下载后直接双击运行，无需安装 Python。
+
+          - 文件：\`XG-040G-MD工具.exe\`
+          - 校验：见附件 \`SHA256SUMS.txt\`
+          - 用法：先把光猫恢复出厂设置（按住 reset 20 秒以上），
+            再把铭牌上的账号密码填进界面，按步骤操作即可
+          - 详细说明见 [README](https://github.com/${{ github.repository }}#readme)
+
+          > 刷机有风险，请先完整备份。默认模式只开 Telnet / FTP 和备份，不会写入任何分区。
+          EOF
+
+          # 顺手给出 sha256，方便用户校验下载是否完整
+          (cd dist && sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+          # 先试创建；已存在（例如手动重跑）就改成覆盖上传
+          gh release create "$TAG" \
+            --title "XG-040G-MD 光猫工具 $TAG" \
+            --notes-file _release_notes.md \
+            dist/*.exe dist/SHA256SUMS.txt \
+          || gh release upload "$TAG" \
+            dist/*.exe dist/SHA256SUMS.txt \
+            --clobber
+
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"

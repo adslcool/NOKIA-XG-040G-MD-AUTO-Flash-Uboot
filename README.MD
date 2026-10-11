@@ -84,6 +84,12 @@ XG-040G-MD工具.exe --selftest
 它会把依赖逐个导入一遍、加载一次 `flash.py`，结果同时写到程序目录的
 `selftest.log`。全部正常退出码为 0；有问题会弹窗并列出缺什么。
 
+加 `--quiet` 可以让它失败时也不弹窗（CI / 无人值守用，只看退出码和日志）：
+
+```bat
+XG-040G-MD工具.exe --selftest --quiet
+```
+
 ### 关于「恢复出厂设置」提示
 
 界面顶部有一条固定的黄色提示，说明**必须先恢复出厂设置**：按住 reset 键
@@ -412,3 +418,51 @@ su user_ftp                     → Password: 输入 j3ba73@8
 
 两者均采用 MIT 许可，并附有「产品出处标注」附加条款；
 本页即为该条款所要求的署名位置。
+
+## 开发者：自己编译 exe / 发版
+
+版本号的唯一来源是 `version.py`，**不要手改**，用发版脚本改。
+
+### 编译 Windows exe（Linux 上用 wine）
+
+```bash
+./build_exe.sh                # 全自动：装 wine 前缀 + Windows Python + 依赖 + 打包 + 自检
+./build_exe.sh --rebuild-python   # 重新安装 Windows Python
+./build_exe.sh --no-selftest      # 跳过打包后的自检
+```
+
+脚本会复用 `_winbuild/` 里已有的 wine 前缀和 Windows Python（该目录不入库，
+但**不要删**——重装很慢）。产物为 `dist/XG-040G-MD工具.exe`。
+
+> 改了 `flash.py` 必须重新跑 `build_exe.sh`：它是运行时动态加载的，
+> 直接替换 exe 同目录的 `flash.py` 也能生效，但想让改动进 exe 就得重打包。
+
+### 发版（自动改版本号 + 打 tag + 触发 CI）
+
+```bash
+./release.sh patch            # 1.1.0 → 1.1.1（修 bug）
+./release.sh minor            # 1.1.0 → 1.2.0（加功能）
+./release.sh major            # 1.1.0 → 2.0.0（不兼容大改）
+./release.sh 1.4.2            # 直接指定版本号
+./release.sh patch --dry-run  # 只打印要做什么，不落盘
+./release.sh --current        # 查看当前版本
+```
+
+脚本会：改 `version.py` → 校验读回一致 → 提交 → 打带注释的 tag → 推送。
+推送后 GitHub Actions 自动编译 exe 并挂到 Release 附件里。
+
+> 发版前工作区必须是干净的（脚本会检查），否则 tag 会指向一个不含改动的提交。
+
+### GitHub Actions
+
+`.github/workflows/build.yml` 在推 `v*` tag 时自动：
+装 Python 3.11 → 装 `telnetlib3` + `pyinstaller` → `py_compile` 语法检查 →
+PyInstaller 打包 → 检查产物大小 → 跑 `--selftest --quiet` 确认依赖齐全 →
+上传 Artifact → 创建 Release 并附上 exe 与 `SHA256SUMS.txt`。
+
+- tag 与 `version.py` 不一致会直接失败（防止打了 tag 忘了改版本号）；
+- 对 `master` 的普通 push 只打包上传 Artifact，不发 Release；
+- 也可在 Actions 页面手动 Run workflow。
+
+exe 的「属性 → 详细信息」里能看到版本号，由 `build_exe.spec` 从
+`version.py` 现生成 `_version_info.txt` 注入。

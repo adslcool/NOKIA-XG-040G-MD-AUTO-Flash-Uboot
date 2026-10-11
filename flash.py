@@ -38,6 +38,22 @@ import http.cookiejar
 import urllib.error
 from urllib import request as urllib_request, parse as urllib_parse
 
+# 版本号唯一来源是 version.py。flash.py 是被 gui.py 用 importlib 动态加载的，
+# sys.path 里不一定有它自己的目录，所以失败时按文件位置再补一次。
+try:
+    from version import VERSION
+except Exception:
+    try:
+        import importlib.util as _ilu
+        _vp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "version.py")
+        _vs = _ilu.spec_from_file_location("version", _vp)
+        _vm = _ilu.module_from_spec(_vs)
+        _vs.loader.exec_module(_vm)
+        VERSION = _vm.VERSION
+    except Exception:
+        VERSION = "0.0.0"
+
 # ================== 配置区 ==================
 ROUTER_IP = "192.168.1.1"
 # 不同型号/固件的 telnet 账号不一样（有的 useradmin，有的 user）。
@@ -1434,11 +1450,11 @@ def run_flow(args, confirm_flash=None):
     mode_desc = {
         "telnet": "仅开启 Telnet（不碰 FTP、不备份、不刷机）",
         "ftp":    "仅开启 FTP（su 提权用，不备份、不刷机）",
-        "backup": "开启 Telnet + 备份全部分区（不刷机）",
-        "flash":  "开启 Telnet + 备份 + 刷写 U-Boot（危险！）",
+        "backup": "开启 Telnet + FTP + 备份全部分区（不刷机）",
+        "flash":  "开启 Telnet + FTP + 备份 + 刷写 U-Boot（危险！）",
     }[mode]
     print("=" * 60)
-    print(f"  XG-040G-MD 工具  ·  运行模式: {mode} — {mode_desc}")
+    print(f"  XG-040G-MD 工具 v{VERSION}  ·  运行模式: {mode} — {mode_desc}")
     print("=" * 60)
 
     # === 0. --reboot：只重启光猫然后退出 ===

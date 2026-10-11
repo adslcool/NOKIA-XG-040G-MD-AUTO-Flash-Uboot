@@ -7,6 +7,10 @@ __pycache__/
 config.ini
 dist/
 build/
+selftest.log
+
+# PyInstaller 的 spec 在构建时现生成的版本资源文件
+_version_info.txt
 
 # 打包工具链：Windows Python 安装包 + wine 前缀。
 # 安装包不删（重新下载慢），只是不入库。

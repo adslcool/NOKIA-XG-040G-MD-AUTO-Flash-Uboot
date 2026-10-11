@@ -14,8 +14,51 @@ import。所以 flash.py 里用到的标准库必须在这里手工列进 hidden
 备份用的临时 HTTP 服务器就依赖它）。
 """
 import os
+import sys
 
 block_cipher = None
+
+# 版本号从 version.py 读（唯一来源），不要在别处再写一遍。
+sys.path.insert(0, SPECPATH)
+try:
+    from version import VERSION, REPO, version_tuple
+except Exception:
+    VERSION, REPO = "0.0.0", ""
+    def version_tuple():
+        return (0, 0, 0)
+
+_VT = version_tuple()
+
+# 生成 Windows 版本资源文件：这样 exe 右键「属性 → 详细信息」里能看到版本号，
+# 而不是一片空白。PyInstaller 的 version= 参数只接受文件路径，所以在这里现写。
+_VERSION_INFO = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={_VT + (0,)},
+    prodvers={_VT + (0,)},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('080404B0', [
+        StringStruct('CompanyName', 'xe5700'),
+        StringStruct('FileDescription', 'XG-040G-MD 光猫工具'),
+        StringStruct('FileVersion', '{VERSION}'),
+        StringStruct('InternalName', 'XG-040G-MD工具'),
+        StringStruct('LegalCopyright', 'WTFPL v2'),
+        StringStruct('OriginalFilename', 'XG-040G-MD工具.exe'),
+        StringStruct('ProductName', 'XG-040G-MD 光猫工具'),
+        StringStruct('ProductVersion', '{VERSION}'),
+        StringStruct('Comments', 'https://github.com/{REPO}'),
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+  ]
+)
+"""
+_VERSION_FILE = os.path.join(SPECPATH, "_version_info.txt")
+with open(_VERSION_FILE, "w", encoding="utf-8") as _f:
+    _f.write(_VERSION_INFO)
 
 # flash.py 作为数据文件带进去（而不是编译进 exe）：这样用户可以直接替换
 # exe 同目录的 flash.py 来改配置区，不用重新打包。
@@ -96,4 +139,6 @@ exe = EXE(
     entitlements_file=None,
     # exe 文件自身的图标（资源管理器 / 快捷方式 / 任务栏用这个）
     icon="icon.ico" if os.path.isfile("icon.ico") else None,
+    # Windows 版本资源（右键属性→详细信息），由上面的 _VERSION_FILE 生成
+    version=_VERSION_FILE,
 )

@@ -18,7 +18,13 @@ from tkinter import ttk, messagebox, scrolledtext
 
 import config as cfgmod
 
+try:
+    from version import VERSION
+except Exception:  # 打包漏了 version.py 时不能让 GUI 起不来
+    VERSION = "0.0.0"
+
 APP_TITLE = "XG-040G-MD 光猫工具"
+APP_TITLE_FULL = f"{APP_TITLE} v{VERSION}"
 
 
 def _resource_dir():
@@ -93,7 +99,7 @@ def _set_window_icon(root):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(APP_TITLE)
+        self.root.title(APP_TITLE_FULL)
         self.root.geometry("1000x820")
         self.root.minsize(900, 760)
         _set_window_icon(self.root)
@@ -459,6 +465,7 @@ def self_test():
     命令行运行：`XG-040G-MD工具.exe --selftest`（GUI 版也能跑，会弹窗显示）
     """
     problems = []
+    print(f"{APP_TITLE_FULL}")
     print(f"程序目录: {_resource_dir()}")
     print(f"打包资源: {_bundle_dir()}")
 
@@ -502,7 +509,8 @@ def self_test():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             print(f"  [✓] flash.py 加载成功"
-                  f"（内置回退分区表 {len(mod.MTD_PARTITIONS)} 个，"
+                  f"（版本号 {getattr(mod, 'VERSION', '未知')}，"
+                  f"内置回退分区表 {len(mod.MTD_PARTITIONS)} 个，"
                   f"运行时以设备 /proc/mtd 为准）")
         except Exception as e:
             problems.append(f"flash.py 加载失败: {type(e).__name__}: {e}")
@@ -553,8 +561,11 @@ def main():
                 f.write(report)
         except Exception:
             pass
-        # 只在**失败**时弹窗：成功还弹会挡住自动化调用（踩过）
-        if problems:
+        # 只在**失败**时弹窗：成功还弹会挡住自动化调用（踩过）。
+        # --quiet（CI 用）则连失败也不弹，只靠 selftest.log 和退出码，
+        # 否则弹窗会在无人值守的环境里把流程挂住。
+        quiet = any(a in ("--quiet", "-q") for a in sys.argv[1:])
+        if problems and not quiet:
             try:
                 root = tk.Tk()
                 root.withdraw()
