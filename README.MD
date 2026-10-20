@@ -12,29 +12,47 @@ python3 gui.py
 
 ![应用截图](应用截图.png)
 
-界面分四块：
+界面分五块：
 
-1. **顶部提示**——常驻的黄色提示，说明使用前要恢复出厂设置（见下文）。
-2. **账号密码**——光猫地址、铭牌用户账号/密码、提权账号、网页超级账号密码，
-   全部存在同目录的 `config.ini` 里。改完点「保存配置」；「恢复默认」会填回
-   移动版出厂默认值（`CMCCAdmin` / `aDm8H%MdA`）。
+1. **机型**——先选机型（贝尔 XG-040G-MD / 烽火 HG5585F CT）。
+   机型决定管理地址与端口、默认账号密码、提权方式、以及哪些按钮可用。
+   切换机型时，**还是上一个机型默认值**的字段会自动换成新机型的值；
+   你手工改过的字段不会被动。想整体重置就点「按此机型填默认值」。
+2. **顶部提示**——常驻的黄色提示，说明使用前要恢复出厂设置（见下文），
+   文案里的超级账号密码会跟着机型变。
+3. **账号密码**——光猫地址、光猫 MAC、铭牌用户账号/密码、提权账号、
+   网页超级账号密码，全部存在同目录的 `config.ini` 里。改完点「保存配置」；
+   「恢复默认」会填回**当前机型**的出厂默认值。
 
-   两个字段有联动：**提权账号会自动填成「铭牌用户账号_ftp」**——改铭牌账号，
-   提权账号跟着变（例如 `user` → `user_ftp`）；如果你手工改过提权账号，
-   程序就不再自动覆盖它。
-3. **操作**——`① 开启 Telnet`、`② 开启 FTP`、`③ 备份全部分区`、`重启光猫`。
-   这些都是只读的，不写入设备任何分区。
-4. **刷机**——默认**锁定**。必须先勾选「我了解风险，启用刷机功能」，
-   刷写按钮才会解锁。点刷写后会弹一个确认框，列出待写入的文件、大小和
-   目标分区，确认后才动手。
-5. **运行日志**——和命令行输出完全一样的内容（GUI 直接接管了 `print`）。
+   三个联动：
+   - **提权账号自动跟随铭牌账号**（贝尔）：改铭牌账号，提权账号跟着变成
+     「账号_ftp」（例如 `user` → `user_ftp`）。烽火的提权账号固定是 `root`，
+     不跟随。你手工改过提权账号后，程序就不再自动覆盖它。
+   - **MAC 推导密码**（烽火）：填了「光猫 MAC」后，telnet 密码与 su 密码
+     会按 `FH-nE7jA%5m`+MAC后6位 / `Fh@`+MAC后6位 自动填出。
+   - 烽火**必须填 MAC**，否则程序会拦下并提示，不会拿着空密码去连 telnet。
+4. **操作**——`① 开启 Telnet`、`② 开启 FTP`、`③ 备份全部分区`、
+   `④ 运行 stock2ubi 刷 U-Boot`、`重启光猫`。除第 ④ 个会把一个工具传到
+   光猫后台运行外，其余都是只读的，不写入设备任何分区。
+   机型不支持的按钮会直接灰掉（烽火没有网页开 Telnet 的接口，但程序会走
+   8080 的 fh_tool RPC 帮你开；烽火也不需要 FTP）。
+5. **TTL 串口**——拆机接串口线时用（见下文「TTL 串口接入」）。勾上
+   「走 TTL 串口」后，开 Telnet / 开 FTP 两个按钮会自动灰掉（串口本身就是
+   root，不需要它们）。
+6. **刷机 / 相关项目 / 运行日志**——刷机默认**锁定**，必须先勾选
+   「我了解风险，启用刷机功能」；烽火不走 tcboot，这一块会整体灰掉并提示
+   改用 ④。日志和命令行输出完全一样（GUI 直接接管了 `print`）。
+
+整个界面可以滚动（加了 TTL 区之后比小屏笔记本高），右侧有滚动条。
 
 `config.ini` 长这样（可以手工编辑，也可以只用界面）：
 
 ```ini
 # 设备与网络
 [device]
+model = bel
 router_ip = 192.168.1.1
+mac =
 auto_enable_telnet = true
 auto_enable_ftp = true
 skip_backup_if_complete = true
@@ -50,6 +68,12 @@ root_password =
 [super]
 username = CMCCAdmin
 password = aDm8H%MdA
+
+# TTL 串口（拆机接线时用；不走就保持 enabled = false）
+[serial]
+enabled = false
+port =
+baudrate = 115200
 
 # 安全开关
 [safety]
@@ -118,8 +142,14 @@ XG-040G-MD工具.exe --selftest --quiet
 
 ### Python 包
 ```bash
-pip install telnetlib3
+pip install telnetlib3            # 所有机型都需要（telnet 登录）
+pip install fh_tool-cli==0.2.7    # 只有烽火机型需要（fh_tool 加密 RPC）
+pip install pyserial              # 只有走 TTL 串口时需要
 ```
+
+三个都是**按需加载**的：贝尔机型没装 `fh_tool-cli` 也能正常跑，
+不走 TTL 没装 `pyserial` 也不影响（只有勾了「走 TTL 串口」才会报错并
+提示安装）。打包好的 exe 里三个都已内置。
 
 ### 系统软件包
 **不再需要 netcat**。备份/上传改用临时 HTTP 服务器 + 设备侧 `curl`（见下文
@@ -129,6 +159,9 @@ pip install telnetlib3
 
 1. **重置路由器**
    - 按住 reset 键 20 秒以上，将设备恢复至出厂设置
+
+   > 如果你打算走 **TTL 串口**（见下文「TTL 串口接入」），第 1 步和下面
+   > 第 2、3 步都可以跳过 —— 串口本身就是 root shell。
 
 2. ~~**登录系统**~~ —— **已自动化，脚本会自动完成**
    - 脚本用超级管理员账号 `CMCCAdmin` / `aDm8H%MdA` 自动登录网页，
@@ -161,9 +194,18 @@ pip install telnetlib3
 | `--mode ftp` | 仅自动开启 FTP（不碰 Telnet） | 否 |
 | `--mode backup`（默认） | 开启 Telnet+FTP + 备份全部分区 | 否 |
 | `--mode flash` | 开启 Telnet+FTP + 备份 + 刷写 U-Boot | **是，危险** |
+| `--mode stock2ubi` | 上传 an758x-stock2ubi 到光猫后台运行 | 否（刷写在它网页里做） |
 
-图形界面里对应四个按钮：`① 开启 Telnet`、`② 开启 FTP`、
-`③ 备份全部分区`、`重启光猫`，外加默认锁定的「刷写 U-Boot」。
+用 `--model` 选机型（默认 `bel`）：
+
+```bash
+python3 flash.py --model bel      --mode backup   # 贝尔 XG-040G-MD / XG-140G-MD
+python3 flash.py --model hg5585f  --mode backup   # 烽火 HG5585F CT
+```
+
+图形界面里对应这些按钮：`① 开启 Telnet`、`② 开启 FTP`、
+`③ 备份全部分区`、`④ 运行 stock2ubi 刷 U-Boot`、`重启光猫`，
+外加默认锁定的「刷写 U-Boot」。
 
 **Telnet 和 FTP 是两个独立开关**，各自单独检测端口：
 - 两个都关 → `--mode backup` 会依次自动开启；
@@ -175,6 +217,7 @@ pip install telnetlib3
 python3 flash.py --mode telnet     # 最安全，只开 telnet
 python3 flash.py --mode backup     # 只备份全部分区
 python3 flash.py --mode flash      # 刷机（会要求输入 YES 二次确认）
+python3 flash.py --mode stock2ubi  # 上传 an758x-stock2ubi 并在光猫后台跑起来
 python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / telnet 锁定）
 ```
 
@@ -182,8 +225,172 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
 - `--no-enable-telnet`：假定 Telnet 已手动开启，跳过网页步骤
 - `--no-enable-ftp`：假定 FTP 已手动开启，跳过网页步骤
 - `--force-backup`：即使已存在同一台设备的完整备份，也强制重新备份
+- `--stock2ubi-file 路径`：指定 an758x-stock2ubi 文件（默认找程序同目录的同名文件）
+- `--stock2ubi-ignore-kernel`：跳过 stock2ubi 启动时的内核 release 检查
 - `-y / --yes`：`flash` 模式下跳过 YES 二次确认
 - `-h / --help`：显示用法
+
+### `--mode stock2ubi`：在光猫上跑网页刷 U-Boot
+
+`tcboot` 刷好之后，想换成更现代的 U-Boot 时用这个模式。它会：
+
+1. 自动开 Telnet + FTP，登录并 `su` 到 root；
+2. 把 [an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi)
+   上传到光猫 `/tmp`，校验 SHA256，`chmod +x`；
+3. 用 `nohup … </dev/null &` 在**后台**跑起来（默认监听 `0.0.0.0:3333`），
+   这样 telnet 会话断开后它也不会跟着退出；
+4. 等 3333 端口就绪，打印启动日志，然后用系统默认浏览器打开
+   `http://192.168.1.1:3333/`。
+
+之后的步骤都在**它自己的网页里**完成（本工具不代劳，那是它的界面）：
+
+- 打开 `http://<设备IP>:3333/`，先备份需要保留的分区
+  （**注意**：本工具自己的「③ 备份全部分区」已经能把 17 个 mtd 分区完整
+  备份下来，和它网页里那个备份是同一件事，两者选一个即可 —— 本工具的好处
+  是备份目录里带 `device.json`，记录机型/SN/每个分区的 SHA256，下次遇到
+  同一台设备可以自动跳过并校验完整性）；
+- 上传对应机型的 `preloader.bin` 或 `firstblock.bin`，以及 AN758x U-Boot 的
+  `bl31-u-boot.fip`；
+- 重启后访问 `http://192.168.0.1/` 继续安装；首次进入恢复页可能要约一分钟。
+
+`an758x-stock2ubi` 本体（aarch64 静态 ELF）放在程序同目录即可，打包 exe 时
+会一并带上；也可以直接替换 exe 同目录的那份，不用重新打包。
+
+```bash
+python3 flash.py --mode stock2ubi                    # 用同目录的 an758x-stock2ubi
+python3 flash.py --mode stock2ubi --stock2ubi-file /path/to/an758x-stock2ubi
+```
+
+相关项目：
+- [an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi) —— 在光猫上跑网页刷 U-Boot
+- [uboot-an758x](https://github.com/pbs05/uboot-an758x) —— AN758x U-Boot 本体
+- [ImmortalWrt-Airoha · XG-040G-MD-ubi-auto](https://github.com/Loong1996/ImmortalWrt-Airoha/releases#release-XG-040G-MD-ubi-auto-20260927-59)
+  —— 现成的 web U-Boot 固件
+
+## 烽火 HG5585F CT 机型
+
+除了贝尔，本工具也支持**烽火 HG5585F CT**（电信版）。在界面顶部选「烽火」
+或在命令行加 `--model hg5585f`。两者的差异都在 `models.py` 里：
+
+| | 贝尔 XG-040G-MD / XG-140G-MD | 烽火 HG5585F CT |
+|---|---|---|
+| 管理网页 | `http://192.168.1.1`（80） | `http://192.168.1.1:8080` |
+| 网页超级账号 | `CMCCAdmin` / `aDm8H%MdA` | `telecomadmin` / `nE7jA%5m` |
+| telnet 账号 | `user` | `telnetadmin` |
+| telnet 密码 | 铭牌上的固定密码 | `FH-nE7jA%5m` + MAC 后 6 位大写 |
+| 提权 | `su user_ftp`（密码=telnet 密码） | `su root`，密码 `Fh@` + MAC 后 6 位大写 |
+| 提权前要先开 FTP | **是**（`user_ftp` 靠 FTP 服务注入） | 否 |
+| 自动开 Telnet | 网页 `POST /system.cgi?telnet+on` | 8080 的 fh_tool 加密 RPC |
+| 刷 U-Boot | `tcboot.bin` 写 mtd0 | 走 `--mode stock2ubi` 的网页 |
+
+### MAC 必须填
+
+烽火的 telnet 密码和 su 密码**都由 MAC 推导**，所以界面上的「光猫 MAC」
+是必填项（MAC 印在机器背面标签上，形如 `70:D5:1E:04:6C:EC`）。
+不填的话程序会直接拦下并提示，不会拿着空密码去连 telnet —— 连续 3 次
+认证失败会锁 300 秒。
+
+填好 MAC 后，密码框留空即可，程序会自动填出推导结果；你也可以手填覆盖。
+
+### 开 Telnet 走 fh_tool，不碰网页会话
+
+烽火的网页里没有「一键开 Telnet」的按钮，但设备在 **8080 端口**上开了一个
+`fh_tool` 加密 RPC：请求体用 MAC 派生的 AES 加密，所以「知道 MAC」就等于
+有权限，**不需要登录后台、也不占用那个唯一的网页会话**。
+
+本工具调用它只需要两步（`fh_tool_cli` 的库函数，不起子进程）：
+
+```python
+from fh_tool_cli.backends.fh_tool import api_payload, fh_tool_call
+payload = api_payload("TelnetEnable", {"telnet": "1"})
+fh_tool_call("192.168.1.1", "70D51E046CEC", payload, 8.0, port=8080)
+```
+
+⚠️ MAC 必须传**无分隔符大写**（`70D51E046CEC`）：`derive_crypto()` 直接拿
+这个字符串做 SHA256，带冒号算出来的密钥是错的，设备会返回 403。
+
+顺便，同一个 RPC 还能**免登录**读到网页超级账号密码：
+
+```python
+fh_tool_call(ip, mac, api_payload("GetAdminAccount"), 8.0, port=8080)
+# -> {"adminname": "telecomadmin", "adminpwd": "nE7jA%5m"}
+```
+
+（本工具目前只用它开 Telnet；读账号的能力留着备用。）
+
+### 烽火不走 tcboot
+
+`tcboot.bin` 是给贝尔（econet en7581）用的，烽火的分区布局不同，所以界面上
+「刷机」那一块会对烽火整体灰掉，并提示改用「④ 运行 stock2ubi 刷 U-Boot」。
+`--mode stock2ubi` 对两个机型都可用。
+
+### 烽火已知限制
+
+- **网页开 Telnet 不可用**：只能靠 fh_tool RPC（本工具已自动做）或手工开。
+- **备份未在真机验证**：分区表是从设备 `/proc/mtd` 实时读的，逻辑与贝尔
+  共用；但烽火真机上的备份流程还没有完整跑过一遍，请先确认 `--mode backup`
+  的产物大小与 `device.json` 里的记录一致再考虑后续操作。
+- **FTP 不开**：烽火提权不需要 `user_ftp`，所以工具不会去开 21 端口。
+
+## TTL 串口接入（拆机接线，绕过一切网页限制）
+
+免拆机那条路（网页开 Telnet + `su user_ftp`）依赖超级密码和 telnet 密码；
+一旦密码被改过、网页会话抢不到、或者 telnet 被锁，就走不通了。TTL 串口是
+**物理旁路**：接上串口线就是设备的 root shell，不需要超级密码、不需要
+Telnet、不需要 FTP，也不需要知道任何密码。
+
+### 接线
+
+- 需要一根 **USB-TTL 串口线**（CH340 / CP2102 / FT232 都行，3.3V）
+- 光猫主板上找 4 个焊盘/排针，一般是 `VCC GND TX RX`（有的板子丝印是
+  `3V3 GND TXD RXD`）
+- **TX 接 RX、RX 接 TX**，GND 必须共地
+- **VCC 不要接**（光猫自己供电，接了可能倒灌）
+- 串口参数：**115200 8N1**，无流控
+
+### 用法
+
+界面：勾选「走 TTL 串口」→ 点「刷新」→ 在下拉框里选端口（**程序不会自动
+猜端口**，插了多个串口设备时猜错就会往别人的设备里敲字符）→ 选波特率 →
+照常用「③ 备份全部分区」。
+
+命令行：
+
+```bash
+python3 flash.py --mode backup --serial-port /dev/ttyUSB0
+python3 flash.py --mode backup --serial-port COM3          # Windows
+python3 flash.py --mode backup --serial-port /dev/ttyUSB0 --serial-baud 57600
+python3 flash.py --mode flash  --serial-port /dev/ttyUSB0  # 刷 U-Boot 同理
+```
+
+先看有哪些串口：
+
+```bash
+python3 serial_shell.py
+```
+
+### 为什么 TTL 不需要改备份/刷写逻辑
+
+`serial_shell.py` 把 pyserial 包装成**和 `telnetlib3.Telnet` 一样的接口**
+（`write` / `expect` / `read_until` / `read_very_eager` / `close`）。
+`flash.py` 的备份、刷写、回读校验全部只通过这几个方法跟设备对话，所以串口
+对象直接当 `tn` 用，整套逻辑原样复用 —— 不需要为 TTL 再写一份实现。
+
+走 TTL 时会自动跳过「开 Telnet」「开 FTP」两个联网步骤（串口本身就是 root，
+开那两个没有意义），界面上的这两个按钮也会灰掉。
+
+### TTL 也能救砖
+
+如果设备已经刷坏、起不来，串口会停在 U-Boot（`U-Boot>` 或
+`Hit any key to stop autoboot`）。工具会识别出这个状态并告诉你当前停在
+引导器里，但**恢复操作需要你自己在串口终端里做** —— 那是 U-Boot 命令，
+不在本工具职责范围内。
+
+### 已知限制
+
+- **没有真机验证**：串口驱动本身用 pty 假设备做了完整测试（登录、读分区表、
+  备份、清单），但还没有在真实光猫上跑过。
+- **pyserial 是可选依赖**：没装时 TTL 功能不可用，telnet 路线不受影响。
 
 ## 配置和刷入
 
@@ -198,8 +405,16 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
    - `tcboot.bin` 来自 **NWRT**——是 nwrt 专门为这款光猫开发的 tcboot
    - 网站地址：https://nwrt.kuroneko.host/
    - 刷完 tcboot 重启后，可以进 tcboot 换成更现代化的新 U-Boot：
-     - 推荐 **loong1996 的 web U-Boot**：
-       https://github.com/Loong1996/ImmortalWrt-Airoha
+     - **一键换法（推荐）**：用 `--mode stock2ubi`（界面上的
+       「④ 运行 stock2ubi 刷 U-Boot」）。它会把
+       [an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi)
+       上传到光猫后台跑起来，再打开它的网页，在里面备份分区、上传
+       `preloader.bin`/`firstblock.bin` 和
+       [uboot-an758x](https://github.com/pbs05/uboot-an758x) 的
+       `bl31-u-boot.fip`，重启后访问 `http://192.168.0.1/` 继续安装。
+       详见上面的「`--mode stock2ubi`」一节。
+     - 也可以直接刷现成的 web U-Boot 固件：
+       [Loong1996 的 ImmortalWrt-Airoha（XG-040G-MD-ubi-auto）](https://github.com/Loong1996/ImmortalWrt-Airoha/releases#release-XG-040G-MD-ubi-auto-20260927-59)
      - **ponwrt** 也兼容，可直接刷
    - 刷 QWRT 有两条路线，别搞混：
      - **tcboot 直接刷 QWRT**：一步到位，不需要拆分；
