@@ -745,6 +745,20 @@ su user_ftp                     → Password: 输入 j3ba73@8
 两者均采用 MIT 许可，并附有「产品出处标注」附加条款；
 本页即为该条款所要求的署名位置。
 
+### 第三方代码
+
+`fhfactory.py`（备份后自动生成 OpenWrt 用的 1 MiB factory 镜像）是
+[fiberhome-factory](https://github.com/22p/fiberhome-factory) 的 Python 移植：
+
+- 上游作者：22p
+- 上游许可：**GPL-2.0-only**
+- 移植范围：`src/model.rs` 的 1 MiB 布局与身份字段处理、`src/import.rs` 的
+  UBI/UBIFS 与 JFFS2 解析、PON 校准格式转换、Wi-Fi MAC 派生
+
+**因此 `fhfactory.py` 这一个文件按 GPL-2.0-only 分发**，不是 WTFPL。
+如果只使用贝尔机型（不触发烽火备份），程序不会 import 它。
+其余文件仍按本仓库 LICENSE（WTFPL）分发。
+
 ## 开发者：自己编译 exe / 发版
 
 版本号的唯一来源是 `version.py`，**不要手改**，用发版脚本改。
