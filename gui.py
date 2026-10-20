@@ -530,9 +530,10 @@ class App:
         # 烽火 tab 的操作提示
         if getattr(self, "fh_hint", None) is not None:
             if m.supports_stock2ubi:
-                t = ("提示：② 会先把 an758x-stock2ubi 上传到光猫并启动，"
-                     "然后自动打开它的网页。备份分区、上传 U-Boot、重启进恢复页"
-                     "都在那个网页里完成 —— 请一直跟着网页走，中途不要断电。")
+                t = ("提示：② 会自动完成这些事：上传并启动 an758x-stock2ubi → "
+                     "把 17 个分区全部下载到 backup_日期_时间/ 并校验 SHA256 → "
+                     "打开它的网页让你上传 preloader / U-Boot → 重启后访问 "
+                     "192.168.0.1 继续安装。备份是本工具做的，不用去网页里点下载。")
             else:
                 t = "提示：本机型暂不支持自动刷写。"
             self.fh_hint.configure(text=t)
@@ -995,12 +996,16 @@ class App:
         self._start_worker(flash.run_flow, args)
 
     def _stock2ubi_args(self, name, flash):
+        # force_backup=False：让 flash.py 先找「同一台设备且校验完整」的旧备份，
+        # 找到就跳过下载（烽火全量备份 400MB+，重复传没必要）。
+        # no_browser=False：备份做完后由 flash.py 打开 stock2ubi 网页。
         return {"mode": "stock2ubi",
                 "enable_telnet": True,
                 "enable_ftp": bool(flash.NEED_FTP_FOR_SU),
                 "yes": False, "reboot": False, "force_backup": False,
                 "stock2ubi_file": name,
-                "stock2ubi_ignore_kernel": False}
+                "stock2ubi_ignore_kernel": False,
+                "no_browser": False}
 
     def on_stock2ubi(self):
         """贝尔 tab：上传 an758x-stock2ubi 并后台运行。
@@ -1027,9 +1032,10 @@ class App:
                 "即将上传并在光猫后台运行 an758x-stock2ubi\n\n"
                 f"文件：{name}（{os.path.getsize(path)} 字节）\n"
                 f"运行位置：光猫 /tmp，监听端口 {flash.STOCK2UBI_PORT}\n\n"
-                "它会在设备上开一个网页，刷写 U-Boot 在**那个网页里**完成：\n"
-                "先备份分区，再上传 preloader.bin / firstblock.bin 与 "
-                "bl31-u-boot.fip。\n\n"
+                "启动后本工具会先把全部分区自动备份下来（带 SHA256 清单，\n"
+                "同一台设备已有完整备份则跳过），再打开它的网页；\n"
+                "刷写 U-Boot 在**那个网页里**完成：上传 preloader.bin /\n"
+                "firstblock.bin 与 bl31-u-boot.fip。\n\n"
                 "⚠️ 刷写过程中绝对不能断电！\n"
                 "⚠️ 重启后必须访问 http://192.168.0.1 继续安装，不能中途放弃，\n"
                 "    否则光猫会变砖，只能用 XMODEM 模式救砖。\n\n"
@@ -1067,15 +1073,17 @@ class App:
 
         if not messagebox.askyesno(
                 APP_TITLE,
-                "即将备份并进入刷 U-Boot 流程\n\n"
+                "即将自动备份全部 17 个分区，然后进入刷 U-Boot 流程\n\n"
                 f"文件：{name}（{os.path.getsize(path)} 字节）\n"
                 f"运行位置：光猫 /tmp，监听端口 {flash.STOCK2UBI_PORT}\n\n"
-                "接下来会在浏览器里打开 an758x-stock2ubi 的网页，"
-                "请按网页顺序操作：\n"
-                "  1. 备份需要保留的分区；\n"
-                "  2. 上传对应机型的 preloader.bin / firstblock.bin 与 "
-                "bl31-u-boot.fip；\n"
-                "  3. 重启后立刻访问 http://192.168.0.1 继续完成安装。\n\n"
+                "程序会自己完成：\n"
+                "  1. 上传并启动 an758x-stock2ubi；\n"
+                "  2. 逐个分区下载到 backup_日期_时间/，边下边算 SHA256，"
+                "并写 device.json 清单（stock2ubi 自己不做校验）；\n"
+                "  3. 备份完再打开它的网页，你在网页里上传 "
+                "preloader.bin / firstblock.bin 与 bl31-u-boot.fip；\n"
+                "  4. 重启后立刻访问 http://192.168.0.1 继续完成安装。\n\n"
+                "同一台设备（SN 相同）已有完整备份时会跳过下载。\n\n"
                 "⚠️ 整个过程绝对不能断电！\n"
                 "⚠️ 重启后若停在 192.168.0.1 恢复页却不继续安装，"
                 "光猫会变砖，\n"

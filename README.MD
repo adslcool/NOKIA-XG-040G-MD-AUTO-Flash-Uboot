@@ -219,7 +219,7 @@ pip install pyserial              # 只有走 TTL 串口时需要
 | `--mode ftp` | 仅自动开启 FTP（不碰 Telnet） | 否 |
 | `--mode backup`（默认） | 开启 Telnet+FTP + 备份全部分区 | 否 |
 | `--mode flash` | 开启 Telnet+FTP + 备份 + 刷写 U-Boot | **是，危险** |
-| `--mode stock2ubi` | 上传 an758x-stock2ubi 到光猫后台运行 | 否（刷写在它网页里做） |
+| `--mode stock2ubi` | 上传 an758x-stock2ubi + 自动备份校验 + 打开网页 | 否（刷写在它网页里做） |
 
 用 `--model` 选机型（默认 `bel`）：
 
@@ -254,6 +254,7 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
 - `--force-backup`：即使已存在同一台设备的完整备份，也强制重新备份
 - `--stock2ubi-file 路径`：指定 an758x-stock2ubi 文件（默认找程序同目录的同名文件）
 - `--stock2ubi-ignore-kernel`：跳过 stock2ubi 启动时的内核 release 检查
+- `--no-browser`：`stock2ubi` 模式下不自动打开浏览器（脚本/远程用）
 - `-y / --yes`：`flash` 模式下跳过 YES 二次确认
 - `-h / --help`：显示用法
 
@@ -261,24 +262,33 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
 
 `tcboot` 刷好之后，想换成更现代的 U-Boot 时用这个模式。它会：
 
-1. 自动开 Telnet + FTP，登录并 `su` 到 root；
+1. 自动开 Telnet（需要 FTP 提权的机型还会开 FTP），登录并 `su` 到 root；
 2. 把 [an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi)
    上传到光猫 `/tmp`，校验 SHA256，`chmod +x`；
 3. 用 `nohup … </dev/null &` 在**后台**跑起来（默认监听 `0.0.0.0:3333`），
    这样 telnet 会话断开后它也不会跟着退出；
-4. 等 3333 端口就绪，打印启动日志，然后用系统默认浏览器打开
+4. **自动备份全部 17 个分区**到 `backup_日期_时间/`：逐个分区从
+   `http://<设备IP>:3333/backup/N` 流式下载，边下边算 SHA256，
+   下完写 `device.json` 清单（机型 / SN / 每个分区的大小与哈希）；
+5. 等 3333 端口就绪，打印启动日志，然后用系统默认浏览器打开
    `http://192.168.1.1:3333/`。
 
-之后的步骤都在**它自己的网页里**完成（本工具不代劳，那是它的界面）：
+**备份由本工具做，不用去它网页里再点一次下载。** 原因：
 
-- 打开 `http://<设备IP>:3333/`，先备份需要保留的分区
-  （**注意**：本工具自己的「③ 备份全部分区」已经能把 17 个 mtd 分区完整
-  备份下来，和它网页里那个备份是同一件事，两者选一个即可 —— 本工具的好处
-  是备份目录里带 `device.json`，记录机型/SN/每个分区的 SHA256，下次遇到
-  同一台设备可以自动跳过并校验完整性）；
+- stock2ubi 只是把 `/dev/mtdN` 原样吐出来，**它自己不做任何校验**；
+  本工具会补上大小校验和逐文件 SHA256，并记进 `device.json`；
+- 同一台设备（SN 相同）已有校验完整的备份时会直接跳过，省掉 400MB+ 的传输
+  （想强制重来加 `--force-backup`）；
+- 实测速率 7~11 MB/s，17 个分区约 40 秒。
+
+备份完之后剩下的步骤在**它自己的网页里**完成（本工具不代劳，那是它的界面）：
+
 - 上传对应机型的 `preloader.bin` 或 `firstblock.bin`，以及 AN758x U-Boot 的
   `bl31-u-boot.fip`；
 - 重启后访问 `http://192.168.0.1/` 继续安装；首次进入恢复页可能要约一分钟。
+
+> ⚠️ 刷写过程中**绝对不能断电**，重启后**必须**访问 `192.168.0.1` 继续完成
+> 安装，否则光猫会变成砖头，只能用 XMODEM 模式救砖。
 
 `an758x-stock2ubi` 本体（aarch64 静态 ELF）放在程序同目录即可，打包 exe 时
 会一并带上；也可以直接替换 exe 同目录的那份，不用重新打包。
@@ -372,7 +382,8 @@ fh_tool_call(ip, mac, api_payload("GetAdminAccount"), 8.0, port=8080)
 `tcboot.bin` 是专门给贝尔移动版（econet en7581）做的，只适配移动型号；
 联通/电信版很可能用不了，其它 AN7581 的猫也不认这个 tcboot。所以烽火 tab
 里**根本没有** tcboot 刷机区，而是把「备份」和「刷 U-Boot」合并成
-`② 备份并刷 U-Boot（stock2ubi）` —— 两件事都在 stock2ubi 的网页里完成。
+`② 备份并刷 U-Boot（stock2ubi）` —— 备份由本工具自动做完（带 SHA256 清单），
+刷写部分在 stock2ubi 的网页里完成。
 `--mode stock2ubi` 对两个机型都可用。
 
 ### 烽火已知限制

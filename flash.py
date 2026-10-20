@@ -822,6 +822,7 @@ def parse_args(argv):
             "force_backup": not SKIP_BACKUP_IF_COMPLETE,
             "stock2ubi_file": STOCK2UBI_FILE,
             "stock2ubi_ignore_kernel": STOCK2UBI_IGNORE_KERNEL,
+            "no_browser": False,
             "model": None,
             "serial_port": "", "serial_baud": None,
             "serial_user": "", "serial_password": None}
@@ -850,6 +851,8 @@ def parse_args(argv):
             args["stock2ubi_file"] = a.split("=", 1)[1]; i += 1
         elif a == "--stock2ubi-ignore-kernel":
             args["stock2ubi_ignore_kernel"] = True; i += 1
+        elif a == "--no-browser":
+            args["no_browser"] = True; i += 1
         elif a == "--serial-port" and i + 1 < len(argv):
             args["serial_port"] = argv[i + 1]; i += 2
         elif a.startswith("--serial-port="):
@@ -875,7 +878,7 @@ def parse_args(argv):
                   "[--no-enable-telnet] [--no-enable-ftp] [--force-backup] "
                   "[--reboot] [--model bel|hg5585f] "
                   "[--stock2ubi-file 路径] "
-                  "[--stock2ubi-ignore-kernel] "
+                  "[--stock2ubi-ignore-kernel] [--no-browser] "
                   "[--serial-port /dev/ttyUSB0|COM3] [--serial-baud 115200] "
                   "[--serial-user root] [--serial-password xxx] [-y]")
             sys.exit(0)
@@ -1936,6 +1939,11 @@ def collect_device_info(tn):
                 v = (dev or {}).get(src)
                 if v and not info.get(dst):
                     info[dst] = str(v).strip()
+            # 烽火的 GetDevInfo 不返回机型名，固件里 hostname 又是 (none)，
+            # 所以用机型档案的名字补上 —— 否则 device.json 里 ModelName 为空，
+            # 备份清单打印出来是「设备信息: 未知 / SN xxx」，很难认。
+            if not info.get("ModelName") and MODEL is not None:
+                info["ModelName"] = getattr(MODEL, "name", "") or MODEL.key
             print(f"[*] 已通过 fh_tool GetDevInfo 读取设备信息（SN {info.get('SerialNumber', '未知')}）")
         except Exception as e:  # noqa: BLE001
             print(f"[*] fh_tool GetDevInfo 读取失败（{e}），SN 可能为空。")
@@ -1993,26 +2001,39 @@ def verify_backup_complete(backup_dir, info):
         return False, f"序列号不同（清单 {old_sn} / 当前 {new_sn}）"
 
     files = manifest.get("files") or {}
+    if not files:
+        return False, "清单里没有任何分区文件记录"
+
+    # 按**分区号**把清单条目建索引，而不是按文件名。
+    # 为什么：文件名里带分区名（mtd13_factory.bin），而分区名会随固件版本
+    # 变（官方升级后 apps→apps2 这类改名很常见）。如果拿实时分区名去拼
+    # 文件名找清单，一次改名就会把一份完好的备份判成「不完整」，用户只好
+    # 白等一次 400MB 的重传。分区号才是稳定的。
+    by_index = {}
+    for fname, rec in files.items():
+        m = re.match(r"mtd(\d+)_", fname)
+        if m:
+            by_index[int(m.group(1))] = (fname, rec or {})
+
     pairs = _mtd_pairs()
-    if len(files) < len(pairs):
-        return False, f"清单只记录了 {len(files)}/{len(pairs)} 个分区"
     for i, name in pairs:
-        fname = f"mtd{i}_{name}.bin"
-        rec = files.get(fname)
-        if not rec:
-            return False, f"清单缺少 {fname}"
+        hit = by_index.get(i)
+        if not hit:
+            return False, f"清单缺少分区 mtd{i}（{name}）"
+        fname, rec = hit
         fpath = os.path.join(backup_dir, fname)
         if not os.path.isfile(fpath):
             return False, f"备份文件缺失: {fname}"
         size = os.path.getsize(fpath)
-        if size != rec.get("size"):
-            return False, f"{fname} 大小不符（{size} != 清单 {rec.get('size')}）"
+        if rec.get("size") is not None and size != rec["size"]:
+            return False, f"{fname} 大小不符（{size} != 清单 {rec['size']}）"
         expected = MTD_SIZES.get(i)
         if expected and size != expected:
             return False, f"{fname} 大小与本机分区表不符（{size} != {expected}）"
-        if _sha256sum(fpath) != rec.get("sha256"):
+        want = rec.get("sha256")
+        if want and _sha256sum(fpath) != want:
             return False, f"{fname} SHA256 校验失败（文件可能损坏）"
-    return True, f"序列号 {new_sn} 的备份完整且校验通过"
+    return True, f"序列号 {new_sn} 的备份完整且校验通过（{len(pairs)} 个分区）"
 
 def find_verified_backup(current_info, root_dir="."):
     """在 root_dir 下扫描已有 backup_* 目录，找出同一台设备且校验完整的备份。
@@ -2178,21 +2199,28 @@ def _stock2ubi_ensure_running(tn, local_ip, ignore_kernel=False):
     return f"http://{ROUTER_IP}:{STOCK2UBI_PORT}"
 
 
-def backup_all_partitions(tn, local_ip, backup_dir):
+def backup_all_partitions(tn, local_ip, backup_dir, transport=None):
     """备份所有 MTD 分区到 backup_dir。
 
-    两种传输方式，按机型选（BACKUP_TRANSPORT）：
+    transport 为 None 时用机型默认的 BACKUP_TRANSPORT；显式传入时以参数为准
+    （stock2ubi 模式已经在设备上跑起了它的 HTTP 服务，就该直接用它备份，
+    没必要再按机型去挑 curl/tftp）。
+
+    三种传输方式，按机型选（BACKUP_TRANSPORT）：
       - curl：设备侧 dd 直读，curl PUT 到主机的临时 HTTP 服务器（贝尔实测
         有 curl 7.77）。请求-响应模型，不存在"监听起晚了就丢数据"的竞态。
       - tftp：设备侧 dd 直读，busybox tftp 推到主机的临时 TFTP 服务器
         （烽火按官方教程就是这么备份的；它的 busybox 不一定带 curl）。
-    两者都是每个分区独立一次传输，失败可单独重试，不会污染其它分区。
+      - stock2ubi：主机主动连设备 3333 的 /backup/N 下载（最快，且不受
+        主机防火墙入站规则影响）。
+    都是每个分区独立一次传输，失败可单独重试，不会污染其它分区。
     """
     os.makedirs(backup_dir, exist_ok=True)
     print(f"[*] 备份目录: {backup_dir}")
 
-    # 传输方式：机型指定 curl/tftp/stock2ubi，auto 则按设备实际能力挑
-    transport = BACKUP_TRANSPORT
+    # 传输方式：参数优先，其次机型指定的 curl/tftp/stock2ubi，
+    # auto 则按设备实际能力挑
+    transport = transport or BACKUP_TRANSPORT
     if transport == "auto":
         # auto 的优先级：stock2ubi（主机主动连设备，最快且不受主机防火墙
         # 入站规则影响）→ curl → tftp。
@@ -2534,7 +2562,7 @@ def run_flow(args, confirm_flash=None):
         "ftp":    "仅开启 FTP（su 提权用，不备份、不刷机）",
         "backup": "开启 Telnet + FTP + 备份全部分区（不刷机）",
         "flash":  "开启 Telnet + FTP + 备份 + 刷写 U-Boot（危险！）",
-        "stock2ubi": "开启 Telnet + FTP + 后台运行 an758x-stock2ubi（网页里刷）",
+        "stock2ubi": "开启 Telnet + 运行 an758x-stock2ubi + 自动备份校验（网页里刷）",
     }[mode]
     print("=" * 60)
     print(f"  XG-040G-MD 工具 v{VERSION}  ·  运行模式: {mode} — {mode_desc}")
@@ -2655,9 +2683,13 @@ def run_flow(args, confirm_flash=None):
     else:
         tn = telnet_login()
 
-    # === 4a. stock2ubi 模式：上传并后台运行，然后结束 ===
-    # 它自带 HTTP 服务，后续的备份分区 / 上传 preloader + bl31-u-boot.fip /
-    # 重启进恢复页都在它自己的网页里完成，本工具不代劳。
+    # === 4a. stock2ubi 模式：上传并后台运行 → 自动备份 → 打开网页 ===
+    # stock2ubi 自带 HTTP 服务，/backup/N 就是各分区的原始数据。所以本工具
+    # 先自己把备份做完（下载 + 大小校验 + SHA256 + device.json 清单），
+    # 再打开它的网页让用户上传 preloader / U-Boot。
+    # 为什么不让用户去网页里点「下载」：stock2ubi 自己不做任何校验，网页点
+    # 完是浏览器里的一堆文件，没有清单、没法确认「这台设备的备份是否完整」，
+    # 下次也没法跳过重复备份。备份是本工具的强项，不该外包出去。
     if mode == "stock2ubi":
         path = find_stock2ubi(args.get("stock2ubi_file"))
         if not path:
@@ -2666,12 +2698,61 @@ def run_flow(args, confirm_flash=None):
             print(f"[!] 下载地址: {STOCK2UBI_PROJECT_URL}")
             tn.close()
             sys.exit(1)
-        run_stock2ubi(tn, local_ip, path,
-                      ignore_kernel=args.get("stock2ubi_ignore_kernel", False))
-        tn.close()
-        print("\n[✓] 操作完成！an758x-stock2ubi 仍在设备后台运行。")
+
+        # 4a-1. 先读分区表：备份要按本机真实分区号/大小走
+        live_table = read_mtd_table(tn)
+        if apply_mtd_table(live_table):
+            print(f"[*] 已从设备读取分区表：共 {len(live_table)} 个分区")
+        else:
+            print("[!] 未能从 /proc/mtd 解析出分区表，回退到内置默认表"
+                  f"（{len(MTD_PARTITIONS)} 个分区）。")
+
+        # 4a-2. 上传并启动（3333 已在监听则直接复用）
+        base_url = _stock2ubi_ensure_running(
+            tn, local_ip, ignore_kernel=args.get("stock2ubi_ignore_kernel", False))
+
+        # 4a-3. 自动备份 + 校验
+        device_info = collect_device_info(tn)
+        sn = device_info.get("SerialNumber", "未知")
+        print(f"[*] 设备: {device_info.get('ModelName', '未知')}"
+              f"（{device_info.get('Manufacturer', '?')}）SN={sn}")
+
+        skipped_dir = None
+        if not args.get("force_backup"):
+            found, why = find_verified_backup(device_info, ".")
+            if found:
+                skipped_dir = found
+                print(f"[✓] 发现同一台设备（SN {sn}）的完整备份，跳过备份：{found}")
+                print(f"    {why}")
+            else:
+                print(f"[*] 需要备份（{why}）")
+
+        if skipped_dir:
+            backup_dir_used = skipped_dir
+        else:
+            this_dir = _unique_backup_dir()
+            backup_all_partitions(tn, local_ip, this_dir, transport="stock2ubi")
+            backup_dir_used = this_dir
+
+        # 4a-4. 打开 stock2ubi 网页，继续刷 U-Boot
+        url = f"{base_url}/"
+        print(f"\n[✓] 备份完成，an758x-stock2ubi 正在设备后台运行。")
+        if backup_dir_used:
+            print(f"    备份目录: {backup_dir_used}")
+        print(f"    打开 {url} 继续：上传对应机型的 preloader.bin /"
+              f" firstblock.bin 与 bl31-u-boot.fip。")
+        print(f"    重启后访问 http://192.168.0.1/ 继续安装"
+              f"（首次进入恢复页可能要约一分钟）。")
         print(f"    项目地址: {STOCK2UBI_PROJECT_URL}")
         print(f"    U-Boot 项目地址: {STOCK2UBI_UBOOT_URL}")
+        tn.close()
+        if not args.get("no_browser"):
+            try:
+                import webbrowser
+                webbrowser.open(url)
+                print(f"[*] 已尝试用默认浏览器打开 {url}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[*] 自动打开浏览器失败（{e}），请手动打开 {url}")
         return
 
     # === 4b. 读取设备真实分区表 ===
