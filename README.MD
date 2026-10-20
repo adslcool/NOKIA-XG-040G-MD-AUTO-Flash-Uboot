@@ -37,7 +37,7 @@ tab 各有各的表单、提示和按钮，互不影响，配置也分开存（�
    「我了解风险，启用刷机功能」。只对贝尔移动版有效。
 5. **运行日志**——和命令行输出完全一样（GUI 直接接管了 `print`）。
 
-### 烽火 tab（HG5585F / 后续 AN7581 系列）
+### 烽火 HG5585F 电信版 tab
 
 只需要填**四项**：光猫地址、光猫 MAC、网页超级账号、网页超级密码。
 telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程序按机型
@@ -52,7 +52,16 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
    preloader / U-Boot 都在 stock2ubi 的网页里完成，对本工具来说就是
    「把工具传上去跑起来 + 打开网页」一件事。后续适配 AN7581 家族
    （HG5382A 等）也走这条，因为 `tcboot.bin` 是专门给贝尔移动版做的。
-3. **断电警告**——界面上常驻一条红框警告：刷机过程中绝对不能断电；
+3. **U-Boot 固件下载**——操作区下面直接给了两个发布页链接：
+   - [pbs05 / uboot-an758x](https://github.com/pbs05/uboot-an758x/releases)
+     —— **HG5585F 用这个**，下 `bl31-u-boot.fip`；
+   - [Loong1996 / ImmortalWrt-Airoha](https://github.com/Loong1996/ImmortalWrt-Airoha/releases)
+     —— web U-Boot，支持 XG-040G 全系列与 HG5382A，但**尚未适配
+     HG5585F**，别在烽火上刷。
+
+   贝尔 tab 的操作区也放了同样两个链接（贝尔两种都能用）。
+
+4. **断电警告**——界面上常驻一条红框警告：刷机过程中绝对不能断电；
    重启后必须立刻访问 `http://192.168.0.1` 继续完成安装；否则光猫变砖，
    只能用 XMODEM 模式救砖。这是作者和群里多位群友踩过的坑。
 
@@ -307,7 +316,7 @@ python3 flash.py --mode stock2ubi --stock2ubi-file /path/to/an758x-stock2ubi
 ## 烽火 HG5585F CT 机型
 
 除了贝尔，本工具也支持**烽火 HG5585F CT**（电信版），以及后续的 AN7581
-系列。图形界面里切到第二个 tab「烽火 / AN7581 系列」，命令行加
+系列。图形界面里切到第二个 tab「烽火 HG5585F 电信版」，命令行加
 `--model hg5585f`。两者的差异都在 `models.py` 里：
 
 | | 贝尔 XG-040G-MD / XG-140G-MD | 烽火 HG5585F CT |

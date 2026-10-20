@@ -186,7 +186,7 @@ class App:
         tab_bel = ttk.Frame(notebook)
         tab_fh = ttk.Frame(notebook)
         notebook.add(tab_bel, text="  贝尔 XG-040G-MD / XG-140G-MD（移动版）  ")
-        notebook.add(tab_fh, text="  烽火 / AN7581 系列（电信·联通）  ")
+        notebook.add(tab_fh, text="  烽火 HG5585F 电信版  ")
         notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
         self._build_bel_tab(self._make_scroll_tab(tab_bel))
@@ -298,6 +298,23 @@ class App:
             linkrow,
             "an758x-stock2ubi（在光猫上刷 U-Boot 的网页工具）",
             "https://github.com/pbs05/an758x-stock2ubi"
+        ).pack(side="left")
+
+        # U-Boot 固件下载：这里放的是「去哪儿下 bl31-u-boot.fip / web U-Boot」。
+        # 用户明确要求把这两个地址写在界面上，省得再回帖子里翻。
+        dlrow = ttk.Frame(ops)
+        dlrow.pack(anchor="w", pady=(2, 0))
+        ttk.Label(dlrow, text="U-Boot 固件：", foreground="#666").pack(side="left")
+        self._link_label(
+            dlrow,
+            "pbs05 / uboot-an758x 发布页",
+            "https://github.com/pbs05/uboot-an758x/releases"
+        ).pack(side="left")
+        ttk.Label(dlrow, text="　·　", foreground="#999").pack(side="left")
+        self._link_label(
+            dlrow,
+            "Loong1996 / ImmortalWrt-Airoha（web U-Boot，支持 XG-040G 全系列、HG5382A）",
+            "https://github.com/Loong1996/ImmortalWrt-Airoha/releases"
         ).pack(side="left")
 
         # ===== 刷机（tcboot.bin 写 mtd0，只对贝尔移动版有效）=====
@@ -414,6 +431,30 @@ class App:
             "an758x-stock2ubi（备份分区 + 刷 U-Boot 的网页工具）",
             "https://github.com/pbs05/an758x-stock2ubi"
         ).pack(side="left")
+
+        # U-Boot 固件下载。HG5585F 只有 pbs05 的 uboot-an758x 能直接用；
+        # Loong1996 那个 web U-Boot 目前**没适配 HG5585F**，所以单独一行
+        # 并明确写出来，避免用户照着刷错固件。
+        dlrow = ttk.Frame(ops)
+        dlrow.pack(anchor="w", pady=(2, 0))
+        ttk.Label(dlrow, text="U-Boot 固件：", foreground="#666").pack(side="left")
+        self._link_label(
+            dlrow,
+            "pbs05 / uboot-an758x 发布页（本机型用这个）",
+            "https://github.com/pbs05/uboot-an758x/releases"
+        ).pack(side="left")
+        ttk.Label(dlrow, text="　·　", foreground="#999").pack(side="left")
+        self._link_label(
+            dlrow,
+            "Loong1996 / ImmortalWrt-Airoha（web U-Boot，暂未适配 HG5585F）",
+            "https://github.com/Loong1996/ImmortalWrt-Airoha/releases"
+        ).pack(side="left")
+
+        ttk.Label(
+            ops, foreground="#a50e0e", wraplength=940, justify="left",
+            text="注意：Loong1996 的 web U-Boot 支持 XG-040G 全系列与 HG5382A，"
+                 "但尚未适配 HG5585F。HG5585F 请用 pbs05 / uboot-an758x 的固件。"
+        ).pack(anchor="w", pady=(2, 0))
 
         # ===== 断电警告（常驻，红底）=====
         # 用户明确要求：这条必须写在界面上，因为教程没写清楚导致群里很多人变砖。
