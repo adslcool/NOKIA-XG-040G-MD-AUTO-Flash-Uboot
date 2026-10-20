@@ -456,6 +456,70 @@ class App:
                  "但尚未适配 HG5585F。HG5585F 请用 pbs05 / uboot-an758x 的固件。"
         ).pack(anchor="w", pady=(2, 0))
 
+        # ===== 刷机步骤（顺序不能乱，所以做成编号清单）=====
+        # 用户要求把 stock2ubi 网页里的操作顺序写在界面上：网页里那几块
+        # 是平铺的（刷写 BL2 / UBI 操作 / 板级数据 / 刷写 U-Boot / 刷写系统），
+        # 新手很容易跳过「重建 UBI」或者先刷 U-Boot 再补 preloader —— 那样
+        # 直接变砖。顺序写死在这里，比让用户自己猜可靠。
+        steps = ttk.LabelFrame(
+            outer, text="刷机步骤（进 stock2ubi 网页后按这个顺序做，顺序错了会变砖）",
+            padding=8)
+        steps.pack(fill="x", pady=(10, 0))
+
+        step_text = (
+            ("1", "刷写 BL2",
+             "上传 preloader.bin（或 firstblock.bin），点「上传并写入」。\n"
+             "    文件名形如 an7581-fiberhome-hg5585f-ct-preloader.bin。"),
+            ("2", "重建 UBI",
+             "点「重建 UBI」。这一步会清空 UBI 里的全部数据，属于正常现象 ——\n"
+             "    首次刷机必须先重建，否则后面的分区写不进去。\n"
+             "    ⚠️ 重建前必须已经完成第 1 步（preloader 已写入），否则必砖！"),
+            ("3", "刷入板级数据 factory",
+             "上传第 ② 步备份出来的 mtd13_factory.bin（1.0 MiB），\n"
+             "    点「上传并写入」。这是本机唯一的校准数据，丢了 WiFi/光功率会异常，\n"
+             "    而且别的机器上的 factory 不能混用。"),
+            ("4", "刷写 U-Boot",
+             "上传 bl31-u-boot.fip，点「上传并写入」。\n"
+             "    这个文件从 pbs05/uboot-an758x 发布页下载（见下方链接）。"),
+            ("5", "刷写系统",
+             "上传 QWRT 或 PONWRT 的固件（sysupgrade.bin / sysupgrade.itb），\n"
+             "    点「上传并刷写」。"),
+            ("6", "启动系统",
+             "点「启动系统」。第一次启动较慢（约 1~3 分钟），不要因为没反应就断电。\n"
+             "    ⚠️ 点之前必须确认 preloader.bin 和 bl31-u-boot.fip 都已刷入成功，\n"
+             "    缺任何一个就点「启动系统」，必砖！"),
+        )
+        for num, title, detail in step_text:
+            rowf = ttk.Frame(steps)
+            rowf.pack(fill="x", pady=(0, 6))
+            tk.Label(rowf, text=num, width=2, anchor="n",
+                     font=("", 11, "bold"), fg="#0a66c2").pack(side="left")
+            tk.Label(rowf, text=title, font=("", 10, "bold"),
+                     anchor="nw").pack(side="left", padx=(4, 8))
+            tk.Label(rowf, text=detail, justify="left", anchor="w",
+                     wraplength=760).pack(side="left", fill="x", expand=True)
+
+        brick = tk.Frame(steps, bg="#fdecea",
+                         highlightbackground="#d93025", highlightthickness=1)
+        brick.pack(fill="x", pady=(4, 0))
+        tk.Label(
+            brick, bg="#fdecea", fg="#a50e0e", justify="left", anchor="w",
+            wraplength=920, font=("", 10, "bold"),
+            text="⚠️ 两条必砖红线：\n"
+                 "  1. 没刷入 preloader.bin 就点「重建 UBI」→ 必砖；\n"
+                 "  2. 没刷入 bl31-u-boot.fip 就点「启动系统」→ 必砖。\n"
+                 "重建 UBI 只清 UBI 里的数据，不动 preloader 和 U-Boot；"
+                 "但这两块 boot 区一旦缺失，\n重建后再也起不来，"
+                 "只能拆机接串口用 XMODEM 救砖。"
+        ).pack(anchor="w", padx=8, pady=6)
+
+        ttk.Label(
+            steps, foreground="#666", wraplength=940, justify="left",
+            text="第 3 步的 factory 数据来自本工具第 ② 步的自动备份"
+                 "（backup_日期_时间/mtd13_factory.bin）。\n"
+                 "务必用这台机器自己的备份，不要用别人的。"
+        ).pack(anchor="w", pady=(2, 0))
+
         # ===== 断电警告（常驻，红底）=====
         # 用户明确要求：这条必须写在界面上，因为教程没写清楚导致群里很多人变砖。
         warn = tk.Frame(outer, bg="#fdecea", highlightbackground="#d93025",
@@ -1074,9 +1138,14 @@ class App:
                 f"文件：{name}（{os.path.getsize(path)} 字节）\n"
                 f"运行位置：光猫 /tmp，监听端口 {flash.STOCK2UBI_PORT}\n\n"
                 "启动后本工具会先把全部分区自动备份下来（带 SHA256 清单，\n"
-                "同一台设备已有完整备份则跳过），再打开它的网页；\n"
-                "刷写 U-Boot 在**那个网页里**完成：上传 preloader.bin /\n"
-                "firstblock.bin 与 bl31-u-boot.fip。\n\n"
+                "同一台设备已有完整备份则跳过），再打开它的网页。\n\n"
+                "网页里的刷写顺序（顺序错了会变砖）：\n"
+                "  ① 刷写 BL2 —— 上传 preloader.bin / firstblock.bin\n"
+                "  ② 重建 UBI（首次刷机必须先做）\n"
+                "  ③ 板级数据 —— 上传刚备份的 factory 分区\n"
+                "  ④ 刷写 U-Boot —— 上传 bl31-u-boot.fip\n"
+                "  ⑤ 刷写系统 —— 上传 QWRT / PONWRT 的 sysupgrade\n"
+                "  ⑥ 启动系统\n\n"
                 "⚠️ 刷写过程中绝对不能断电！\n"
                 "⚠️ 重启后必须访问 http://192.168.0.1 继续安装，不能中途放弃，\n"
                 "    否则光猫会变砖，只能用 XMODEM 模式救砖。\n\n"
@@ -1121,9 +1190,17 @@ class App:
                 "  1. 上传并启动 an758x-stock2ubi；\n"
                 "  2. 逐个分区下载到 backup_日期_时间/，边下边算 SHA256，"
                 "并写 device.json 清单（stock2ubi 自己不做校验）；\n"
-                "  3. 备份完再打开它的网页，你在网页里上传 "
-                "preloader.bin / firstblock.bin 与 bl31-u-boot.fip；\n"
+                "  3. 备份完打开它的网页，你在网页里按这个顺序刷：\n"
+                "       ① 刷写 BL2 —— 上传 preloader.bin\n"
+                "       ② 重建 UBI（会清空 UBI 内数据，首次刷机必须先做）\n"
+                "       ③ 板级数据 —— 上传刚备份的 mtd13_factory.bin\n"
+                "       ④ 刷写 U-Boot —— 上传 bl31-u-boot.fip\n"
+                "       ⑤ 刷写系统 —— 上传 QWRT / PONWRT 的 sysupgrade\n"
+                "       ⑥ 启动系统（首次约 1~3 分钟，别断电）\n"
                 "  4. 重启后立刻访问 http://192.168.0.1 继续完成安装。\n\n"
+                "⚠️ 两条必砖红线：\n"
+                "   没刷 preloader.bin 就点「重建 UBI」→ 必砖；\n"
+                "   没刷 bl31-u-boot.fip 就点「启动系统」→ 必砖。\n\n"
                 "同一台设备（SN 相同）已有完整备份时会跳过下载。\n\n"
                 "⚠️ 整个过程绝对不能断电！\n"
                 "⚠️ 重启后若停在 192.168.0.1 恢复页却不继续安装，"

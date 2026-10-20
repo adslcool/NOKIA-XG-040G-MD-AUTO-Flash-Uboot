@@ -2523,8 +2523,15 @@ def run_stock2ubi(tn, local_ip, filepath, ignore_kernel=False,
 
     url = f"http://{ROUTER_IP}:{STOCK2UBI_PORT}/"
     print(f"\n[✓] an758x-stock2ubi 已在设备后台运行。")
-    print(f"    打开 {url} 继续：先备份需要保留的分区，再上传对应机型的")
-    print(f"    preloader.bin / firstblock.bin 与 AN758x U-Boot 的 bl31-u-boot.fip。")
+    print(f"    打开 {url} 继续（分区备份由本工具另外完成，不用在网页里点下载）：")
+    print(f"    ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
+    print(f"    ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
+    print(f"       ⚠️ 没刷 preloader 就重建 UBI = 必砖")
+    print(f"    ③ 板级数据      —— 上传本机备份的 factory 分区")
+    print(f"    ④ 刷写 U-Boot   —— 上传 bl31-u-boot.fip")
+    print(f"    ⑤ 刷写系统      —— 上传 QWRT / PONWRT 的 sysupgrade")
+    print(f"    ⑥ 启动系统      —— 首次约 1~3 分钟，别断电")
+    print(f"       ⚠️ 没刷 bl31-u-boot.fip 就启动 = 必砖")
     print(f"    重启后访问 http://192.168.0.1/ 继续安装（首次进入恢复页可能要约一分钟）。")
     print(f"    项目地址: {STOCK2UBI_PROJECT_URL}")
     print(f"    U-Boot 项目地址: {STOCK2UBI_UBOOT_URL}")
@@ -2739,8 +2746,15 @@ def run_flow(args, confirm_flash=None):
         print(f"\n[✓] 备份完成，an758x-stock2ubi 正在设备后台运行。")
         if backup_dir_used:
             print(f"    备份目录: {backup_dir_used}")
-        print(f"    打开 {url} 继续：上传对应机型的 preloader.bin /"
-              f" firstblock.bin 与 bl31-u-boot.fip。")
+        print(f"    打开 {url} ，按下面的顺序刷（顺序错了会变砖）：")
+        print(f"      ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
+        print(f"      ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
+        print(f"         ⚠️ 没刷 preloader 就重建 UBI = 必砖")
+        print(f"      ③ 板级数据      —— 上传本机备份的 factory 分区")
+        print(f"      ④ 刷写 U-Boot   —— 上传 bl31-u-boot.fip")
+        print(f"      ⑤ 刷写系统      —— 上传 QWRT / PONWRT 的 sysupgrade")
+        print(f"      ⑥ 启动系统      —— 首次约 1~3 分钟，别断电")
+        print(f"         ⚠️ 没刷 bl31-u-boot.fip 就启动 = 必砖")
         print(f"    重启后访问 http://192.168.0.1/ 继续安装"
               f"（首次进入恢复页可能要约一分钟）。")
         print(f"    项目地址: {STOCK2UBI_PROJECT_URL}")
