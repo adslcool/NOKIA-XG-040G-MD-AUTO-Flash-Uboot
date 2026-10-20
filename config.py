@@ -35,6 +35,18 @@ DEFAULTS = {
         "username": "CMCCAdmin",
         "password": "aDm8H%MdA",
     },
+    # 烽火 / AN7581 家族（界面上的第二个 tab）。
+    # 为什么单独一段而不是复用 [device]/[telnet]/[super]：两个 tab 的账号密码
+    # 完全不同（贝尔 CMCCAdmin/user_ftp，烽火 telecomadmin/root），放在同一组
+    # 键里就会互相覆盖 —— 在烽火 tab 保存一次，贝尔 tab 的密码就没了。
+    # 贝尔那套保持原键名不动，所以老 config.ini 不用迁移。
+    "fh": {
+        "router_ip": "192.168.1.1",
+        # 光猫 MAC：烽火的 su 密码 = Fh@ + MAC 后 6 位，所以必须要
+        "mac": "",
+        "super_username": "telecomadmin",
+        "super_password": "nE7jA%5m",
+    },
     "serial": {
         # TTL 串口（拆机接线）：走这条路时不需要 Telnet / FTP / 超级密码，
         # 串口本身就是 root shell。端口一律由用户从列表里自己选，不自动探测。
@@ -62,6 +74,7 @@ _SECTION_COMMENTS = {
     "device": "设备与网络",
     "telnet": "telnet 登录与提权账号",
     "super": "网页超级管理员账号（用于自动开启 Telnet / FTP）",
+    "fh": "烽火 / AN7581 家族（第二个标签页）",
     "serial": "TTL 串口（拆机接线）",
     "safety": "安全开关",
 }
@@ -187,7 +200,72 @@ def apply_model(cfg, flash, model=None):
     flash.SUPPORTS_UBOOT_FLASH = m.supports_uboot_flash
     flash.TELNET_ENABLE_MODE = m.telnet_enable
     flash.MODEL_MAC = cfg.get("device", "mac", fallback="").strip()
+    # 试「固定值+MAC后6位」这种流传写法（烽火 True，贝尔 False）
+    flash.TELNET_PASSWORD_TRY_MAC_SUFFIX = m.telnet_password_try_mac_suffix
+    flash.MODEL_PASSWORD = m.telnet_password
+    flash.MODEL_PASSWORD_PREFIX = m.telnet_password_prefix
+    flash.MODEL_TELNET_PASSWORD_FROM_MAC = m.telnet_password_from_mac
+    flash.MODEL_SU_PASSWORD = m.su_password
+    flash.MODEL_SU_PASSWORD_PREFIX = m.su_password_prefix
     return m
+
+
+def apply_fh_to_flash(cfg, flash):
+    """把烽火 tab 的配置写进 flash 模块（与贝尔那套完全独立）。
+
+    与 apply_model/apply_to_flash 的区别：那两套按「机型档案」推默认值，
+    适合贝尔那种「一个机型一套固定账号」；烽火这边用户可能同时装了多个
+    AN7581 机型（HG5585F、HG5382A……），账号密码是用户填的，所以直接
+    以 config.ini 的 [fh] 段为准，只在留空时才用机型档案兜底。
+    """
+    import models as models_mod
+    m = models_mod.get("hg5585f")
+    flash.MODEL = m
+    flash.ROUTER_IP = cfg.get("fh", "router_ip", fallback="").strip() or m.router_ip
+    flash.WEB_PORT = m.web_port
+    flash.TELNET_PORT = m.telnet_port
+    flash.MODEL_TELNET_USER = m.telnet_user
+    flash.MODEL_SU_USER = m.su_user
+    flash.NEED_FTP_FOR_SU = m.need_ftp_for_su
+    flash.SUPPORTS_WEB_TELNET = m.supports_web_telnet
+    flash.SUPPORTS_STOCK2UBI = m.supports_stock2ubi
+    flash.SUPPORTS_UBOOT_FLASH = m.supports_uboot_flash
+    flash.TELNET_ENABLE_MODE = m.telnet_enable
+    flash.BACKUP_TRANSPORT = m.backup_transport
+    flash.MODEL_MAC = cfg.get("fh", "mac", fallback="").strip()
+    flash.MODEL_PASSWORD = m.telnet_password
+    flash.MODEL_PASSWORD_PREFIX = m.telnet_password_prefix
+    flash.MODEL_TELNET_PASSWORD_FROM_MAC = m.telnet_password_from_mac
+    flash.TELNET_PASSWORD_TRY_MAC_SUFFIX = m.telnet_password_try_mac_suffix
+    flash.MODEL_SU_PASSWORD = m.su_password
+    flash.MODEL_SU_PASSWORD_PREFIX = m.su_password_prefix
+    # telnet 密码：固定值 FH-nE7jA%5m（固件里解出来的），用户在 [fh] 里
+    # 没有单独的 telnet 密码键 —— 这是刻意的，避免用户填错反而登录不上。
+    flash.USERNAME = m.telnet_user
+    flash.PASSWORD = m.telnet_password
+    flash.SU_USER = m.su_user
+    flash.ROOT_PASSWORD = ""            # 由 MAC 推导，见 _su_password_candidates
+    flash.SUPER_USER = (cfg.get("fh", "super_username", fallback="").strip()
+                        or m.super_user)
+    flash.SUPER_PASSWORD = (cfg.get("fh", "super_password", fallback="").strip()
+                            or m.super_password)
+    # 烽火不刷 tcboot，备份/刷写合并成 stock2ubi 一步，这两个开关无所谓，
+    # 但保持与贝尔一致，避免 run_flow 里读到旧值
+    flash.AUTO_ENABLE_TELNET = True
+    flash.AUTO_ENABLE_FTP = False
+    return m
+
+
+def fh_defaults(model=None):
+    """烽火 tab 的默认值（新建配置或点「恢复默认」时用）。"""
+    import models as models_mod
+    m = model or models_mod.get("hg5585f")
+    return {
+        "router_ip": m.router_ip,
+        "mac": "",
+        "super_username": m.super_user,
+        "super_password": m.super_password,
+    }
 
 
 def model_defaults(model):

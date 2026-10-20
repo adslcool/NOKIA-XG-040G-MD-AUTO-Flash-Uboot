@@ -52,6 +52,12 @@ class Model:
         self.telnet_password = kw.get("telnet_password", "")
         self.telnet_password_from_mac = kw.get("telnet_password_from_mac", False)
         self.telnet_password_prefix = kw.get("telnet_password_prefix", "")
+        # 是否额外试「固定密码 + MAC 后 6 位」这种流传写法。
+        # 烽火两种说法都在网上流传（固定值 / 固定值+MAC 后缀），而固件证据
+        # 只支持固定值。两个都试最多烧 2 次认证机会（3 次才锁），比让用户
+        # 自己猜、猜错锁 300 秒划算。
+        self.telnet_password_try_mac_suffix = kw.get(
+            "telnet_password_try_mac_suffix", False)
         # 提权
         self.su_user = kw.get("su_user", "root")
         self.su_password = kw.get("su_password", "")
@@ -75,6 +81,10 @@ class Model:
                                           self.telnet_enable == "web")
         self.supports_stock2ubi = kw.get("supports_stock2ubi", False)
         self.supports_uboot_flash = kw.get("supports_uboot_flash", False)
+        # 刷机流程家族：决定 GUI 用哪个 tab、以及「备份」和「刷 U-Boot」
+        # 是两步还是一步。贝尔 = "bel"（tcboot.bin 写 mtd0，只适配移动版）；
+        # 烽火/其他 AN7581 = "fh"（备份与刷写都走 stock2ubi 网页，合成一步）。
+        self.family = kw.get("family", "bel")
         # 说明文案
         self.note = kw.get("note", "")
 
@@ -104,6 +114,7 @@ MODELS = {
         supports_web_telnet=True,
         supports_stock2ubi=True,
         supports_uboot_flash=True,
+        family="bel",
         note="刷 U-Boot 走 tcboot.bin（写 mtd0）或 an758x-stock2ubi。",
     ),
     HG5585F: Model(
@@ -115,24 +126,44 @@ MODELS = {
         web_port=8080,
         super_user="telecomadmin",
         super_password="nE7jA%5m",
-        # telnet 账号固定 telnetadmin，密码 = FH-nE7jA%5m + MAC 后 6 位大写
+        # telnet 账号固定 telnetadmin。
+        # 密码是**固定值 FH-nE7jA%5m，不带 MAC 后缀** —— 这一条是从固件里
+        # 解出来的，不是从网上教程抄的：
+        #   · 省级预置包 fhrom/preconfig/FH_HGU_CH_CT_Zhejiang/pre_usrconfig_conf
+        #     里 TelnetPassword 是密文 2506000049ECBE32C8DE760F0E960B0F0A53953F，
+        #     用固件自带的 libfhcfg.so:fhcfg_dencryp_string_with_mode 解出来
+        #     就是明文 FH-nE7jA%5m；
+        #   · 设备上的 /var/tel_passwd 里 telnetadmin 的 $5$ 哈希用
+        #     `openssl passwd -5 -salt fh 'FH-nE7jA%5m'` 可精确复现；
+        #   · 真机 telnetadmin / FH-nE7jA%5m 实测登录成功。
+        # 网上教程写的「FH-nE7jA%5m + MAC 后 6 位」在 V4.20.M5000 上不成立，
+        # 若遇到别的固件版本登录不上，可在 config.ini 里手工覆盖这个密码。
         telnet_user="telnetadmin",
-        telnet_password_from_mac=True,
-        telnet_password_prefix="FH-nE7jA%5m",
+        telnet_password="FH-nE7jA%5m",
+        telnet_password_from_mac=False,
+        # 网上另有一派说法是「FH-nE7jA%5m + MAC 后 6 位」。固件证据只支持
+        # 固定值，但不同省/不同固件版本确实可能不同，所以固定值失败后
+        # 再试一次带后缀的写法（最多 2 次，不会触发 3 次锁 300 秒）。
+        telnet_password_try_mac_suffix=True,
         # su root，密码 = Fh@ + MAC 后 6 位大写
         su_user="root",
         su_password_from_mac=True,
         su_password_prefix="Fh@",
         # 烽火不需要开 FTP 就能 su root（与贝尔相反）
         need_ftp_for_su=False,
-        # 优先用 curl（和贝尔同一套 HTTP 回传，快且稳）；设备上没 curl 才退
-        # busybox tftp。不要写死 tftp —— curl 能用就用 curl。
-        backup_transport="auto",
+        # 备份走 an758x-stock2ubi 自带的 HTTP 服务（主机主动连设备的 3333，
+        # 属于出站连接，不受主机防火墙入站规则影响；实测 8~11 MB/s，
+        # 比 tftp 快一个数量级）。工具会自动把 stock2ubi 上传并跑起来。
+        # 之所以不用 curl：烽火的 busybox 根本没有 curl（实测只有 wget，
+        # 而 wget 不支持 --post-data，只能下载不能上传）；tftp 虽然能用，
+        # 但要主机 root 绑 69 端口，且入站 UDP 常被 firewalld 挡掉。
+        backup_transport="stock2ubi",
         # 网页里没有一键开 telnet 的接口，但 8080 上的 fh_tool RPC 可以直接开
         telnet_enable="fhtool",
         supports_web_telnet=False,
         supports_stock2ubi=True,
         supports_uboot_flash=False,  # 刷 U-Boot 走 stock2ubi 网页，不写 tcboot
+        family="fh",
         note="开 telnet 走 8080 的 fh_tool 加密 RPC（无需登录后台）；"
              "刷 U-Boot 走 an758x-stock2ubi 网页。",
     ),

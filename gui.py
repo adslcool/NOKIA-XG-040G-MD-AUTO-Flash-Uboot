@@ -120,34 +120,33 @@ class App:
         self._pump_log()
 
     # ---------- 界面 ----------
-    def _build_ui(self):
-        # 内容比屏幕高（加了 TTL 区之后约 1170px），所以整块放进可滚动的
-        # Canvas：小屏笔记本（1366x768）也能滚到最底下的日志框。
-        # 日志框本身也是可滚动的，滚轮事件要让它优先，否则会一起滚。
-        container = ttk.Frame(self.root)
-        container.pack(fill="both", expand=True)
-        canvas = tk.Canvas(container, highlightthickness=0, borderwidth=0)
-        vbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    def _make_scroll_tab(self, parent):
+        """在一个 tab 里做可滚动区域，返回内容 Frame。
+
+        两个 tab 的内容高度不同（贝尔有刷机区、烽火没有），各自滚动比
+        整窗一个滚动条更好用：切 tab 后不会因为另一个 tab 更高而多出空白。
+        """
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vbar.set)
         vbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        outer = ttk.Frame(canvas, padding=10)
-        _win = canvas.create_window((0, 0), window=outer, anchor="nw")
+        inner = ttk.Frame(canvas, padding=10)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        def _on_inner_configure(_e=None):
+        def _on_inner(_e=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
-        def _on_canvas_configure(e):
-            # 让内容宽度跟着窗口走，否则文字换行按最初宽度算，拉大窗口不重排
-            canvas.itemconfigure(_win, width=e.width)
+        def _on_canvas(e):
+            canvas.itemconfigure(win, width=e.width)
 
-        outer.bind("<Configure>", _on_inner_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
+        inner.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>", _on_canvas)
 
         def _on_wheel(e):
-            # 鼠标停在日志框上时交给日志框自己滚，不然两个一起动很难用
-            if isinstance(e.widget, (tk.Text, tk.Listbox)):
+            # 鼠标停在日志框/下拉框上时交给控件自己处理，不然两个一起动很难用
+            if isinstance(e.widget, (tk.Text, tk.Listbox, ttk.Combobox)):
                 return
             if getattr(e, "num", None) == 4:
                 step = -1
@@ -157,55 +156,86 @@ class App:
                 step = -1 if getattr(e, "delta", 0) > 0 else 1
             canvas.yview_scroll(step, "units")
 
-        # Windows/macOS 用 <MouseWheel>，X11 用 Button-4/5，三个都绑
         for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             canvas.bind_all(_seq, _on_wheel)
+        return inner
 
-        self._canvas = canvas
+    def _tip_bar(self, parent, text):
+        """顶部常驻黄色提示条（恢复出厂设置的前提说明）。
 
-        # ===== 机型选择 =====
-        # 放在最上面：机型决定了地址、端口、默认账号密码、可用功能，
-        # 后面的表单和按钮都跟着它变，所以必须先选。
-        modelbox = ttk.LabelFrame(outer, text="机型", padding=8)
-        modelbox.pack(fill="x", pady=(0, 8))
-
-        self.model_var = tk.StringVar()
-        mrow = ttk.Frame(modelbox)
-        mrow.pack(fill="x")
-        ttk.Label(mrow, text="选择机型：").pack(side="left")
-        self.model_combo = ttk.Combobox(
-            mrow, textvariable=self.model_var, state="readonly", width=38,
-            values=[m.name for m in models_mod.all_models()])
-        self.model_combo.pack(side="left")
-        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_change)
-        ttk.Button(mrow, text="按此机型填默认值", command=self.on_fill_model_defaults).pack(
-            side="left", padx=(10, 0))
-        self.model_note = ttk.Label(modelbox, text="", foreground="#666",
-                                    wraplength=900, justify="left")
-        self.model_note.pack(anchor="w", pady=(6, 0))
-
-        # ===== 顶部提示：恢复出厂设置 =====
-        # 这是使用前提的说明，不跟刷机按钮绑定（用户明确要求）。
-        # 文案随机型变化：两个厂商的超级密码不一样。
-        tip = tk.Frame(outer, bg="#fff8e1", highlightbackground="#e0c060",
+        这是使用前提，不跟任何按钮绑定（用户明确要求过）。
+        """
+        tip = tk.Frame(parent, bg="#fff8e1", highlightbackground="#e0c060",
                        highlightthickness=1)
         tip.pack(fill="x", pady=(0, 8))
-        self.tip_label = tk.Label(
-            tip, bg="#fff8e1", fg="#8a6d00", justify="left", anchor="w",
-            wraplength=820, text="")
-        self.tip_label.pack(fill="x", padx=8, pady=6)
+        lbl = tk.Label(tip, bg="#fff8e1", fg="#8a6d00", justify="left",
+                       anchor="w", wraplength=820, text=text)
+        lbl.pack(fill="x", padx=8, pady=6)
+        return lbl
 
-        # ===== 账号密码 =====
-        acct = ttk.LabelFrame(outer, text="账号密码（保存在 config.ini）", padding=8)
+    def _build_ui(self):
+        # 顶层：上面是 Notebook（两个机型 tab），下面是共用的日志框。
+        # 为什么按机型分 tab 而不是一个表单切下拉框：两个厂商的流程差别太大
+        # —— 贝尔要开 FTP 才能 su、要刷 tcboot.bin；烽火不用 FTP、刷写走
+        # stock2ubi 网页且和备份合并成一步。放在一张表单里会有一半控件是
+        # 灰的，用户很难看懂「我现在到底该点哪个」。
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        self.notebook = notebook
+
+        tab_bel = ttk.Frame(notebook)
+        tab_fh = ttk.Frame(notebook)
+        notebook.add(tab_bel, text="  贝尔 XG-040G-MD / XG-140G-MD（移动版）  ")
+        notebook.add(tab_fh, text="  烽火 / AN7581 系列（电信·联通）  ")
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
+
+        self._build_bel_tab(self._make_scroll_tab(tab_bel))
+        self._build_fh_tab(self._make_scroll_tab(tab_fh))
+
+        # ===== 共用底部：配置按钮 + 日志 =====
+        # bottom 不设 expand：否则它会和 Notebook 平分高度，把 tab 内容挤到
+        # 只剩半屏（两个 tab 的表单都比日志重要）。日志框给固定行数即可。
+        bottom = ttk.Frame(self.root, padding=(8, 6))
+        bottom.pack(fill="x", expand=False, pady=(0, 8))
+
+        bar = ttk.Frame(bottom)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="保存配置", command=self.on_save).pack(side="left")
+        ttk.Button(bar, text="重新载入", command=self.on_reload).pack(
+            side="left", padx=6)
+        ttk.Button(bar, text="恢复默认", command=self.on_reset).pack(side="left")
+
+        logbox = ttk.LabelFrame(bottom, text="运行日志", padding=6)
+        logbox.pack(fill="x", pady=(6, 0))
+        self.log = scrolledtext.ScrolledText(
+            logbox, height=8, wrap="word", state="disabled",
+            font=("Consolas", 9))
+        self.log.pack(fill="both", expand=True)
+
+        # TTL 串口控件按用户要求暂时不显示（功能未验证，代码保留）。
+        # 这些变量仍然存在，_load_into_ui / _serial_args 照旧能跑，
+        # 只是永远保持「未勾选」，所以不会走串口那条路。
+        self.serial_on = tk.BooleanVar(value=False)
+        self.serial_port = tk.StringVar(value="")
+        self.serial_baud = tk.StringVar(value="115200")
+
+    # ---------- 贝尔 tab ----------
+    def _build_bel_tab(self, outer):
+        self.tip_label = self._tip_bar(
+            outer,
+            "提示：请先恢复光猫出厂设置\n"
+            "按住光猫 reset 键 20 秒以上，让超级管理员密码回到默认值"
+            "（CMCCAdmin / aDm8H%MdA），程序才能自动登录网页开启 Telnet 与 FTP。")
+
+        acct = ttk.LabelFrame(outer, text="账号密码（保存在 config.ini 的 [device] / [telnet] / [super]）",
+                              padding=8)
         acct.pack(fill="x")
 
         rows = [
             ("device", "router_ip", "光猫地址", False,
              "光猫的管理地址，默认 192.168.1.1"),
-            ("device", "mac", "光猫 MAC", False,
-             "烽火机型必填：telnet / su 密码由 MAC 后 6 位推导（见机型说明）"),
             ("telnet", "username", "铭牌用户账号", False,
-             "光猫底部铭牌上的用户账号（不同型号不同）"),
+             "光猫底部铭牌上的用户账号（本机型为 user）"),
             ("telnet", "password", "铭牌用户密码", False,
              "光猫底部铭牌上的用户密码；telnet 登录用它"),
             ("telnet", "su_user", "提权账号（su）", False,
@@ -217,32 +247,7 @@ class App:
             ("super", "password", "网页超级密码", False,
              "恢复出厂后的默认超级密码，用于自动开启 Telnet / FTP"),
         ]
-        for r, (section, key, label, secret, hint) in enumerate(rows):
-            ttk.Label(acct, text=label + "：").grid(
-                row=r, column=0, sticky="e", padx=(0, 6), pady=3)
-            var = tk.StringVar()
-            self.vars[(section, key)] = var
-            ent = ttk.Entry(acct, textvariable=var, width=38,
-                            show="*" if secret else "")
-            ent.grid(row=r, column=1, sticky="we", pady=3)
-            hint_lbl = ttk.Label(acct, text=hint, foreground="#777")
-            hint_lbl.grid(row=r, column=2, sticky="w", padx=(8, 0), pady=3)
-            self.hint_labels[(section, key)] = hint_lbl
-        acct.columnconfigure(1, weight=1)
-
-        btns = ttk.Frame(acct)
-        btns.grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Button(btns, text="保存配置", command=self.on_save).pack(side="left")
-        ttk.Button(btns, text="重新载入", command=self.on_reload).pack(
-            side="left", padx=6)
-        ttk.Button(btns, text="恢复默认", command=self.on_reset).pack(side="left")
-
-        # 铭牌用户账号一变，提权账号自动跟着变成「账号_ftp」。
-        # 只在用户没手工改过提权账号时才覆盖（_su_auto 记录上次自动填的值），
-        # 免得把用户特意填的账号冲掉。
-        self._su_auto = None
-        self.vars[("telnet", "username")].trace_add("write", self._on_username_change)
-        self.vars[("telnet", "su_user")].trace_add("write", self._on_su_user_change)
+        self._build_account_rows(acct, rows)
 
         # ===== 功能 =====
         ops = ttk.LabelFrame(outer, text="操作（默认只读，不写入任何分区）", padding=8)
@@ -268,7 +273,6 @@ class App:
             row1, text="重启光猫", width=12, command=self.on_reboot)
         self.btn_reboot.pack(side="left", padx=6)
 
-        # 第二行：进阶功能（换 U-Boot / 安装第三方固件）
         row2 = ttk.Frame(ops)
         row2.pack(fill="x", pady=(8, 0))
         self.btn_stock2ubi = ttk.Button(
@@ -281,12 +285,12 @@ class App:
         ttk.Label(row2, text="（放在程序同目录）", foreground="#666").pack(
             side="left", padx=(4, 0))
 
-        ops_hint = ttk.Label(ops, text="", foreground="#666")
-        ops_hint.pack(anchor="w", pady=(6, 0))
-        self.hint_labels["ops_hint"] = ops_hint
+        self.hint_labels["ops_hint"] = ttk.Label(
+            ops, foreground="#666",
+            text="提示：备份需要 root，程序会自动开启 Telnet 与 FTP；"
+                 "若你已手动开过其中一个，点对应的单个按钮即可。")
+        self.hint_labels["ops_hint"].pack(anchor="w", pady=(6, 0))
 
-        # 相关项目链接（只放 an758x-stock2ubi —— U-Boot 本体与 webuboot 的
-        # 链接按用户要求只加在 README 和恩山帖里，不加在 GUI 上）
         linkrow = ttk.Frame(ops)
         linkrow.pack(anchor="w", pady=(4, 0))
         ttk.Label(linkrow, text="相关项目：", foreground="#666").pack(side="left")
@@ -296,36 +300,10 @@ class App:
             "https://github.com/pbs05/an758x-stock2ubi"
         ).pack(side="left")
 
-        # ===== TTL 串口（拆机接串口线，不走 telnet）=====
-        ttlbox = ttk.LabelFrame(
-            outer, text="TTL 串口（拆机接串口线，免 Telnet / 免超级密码）", padding=8)
-        ttlbox.pack(fill="x", pady=(8, 0))
-
-        trow = ttk.Frame(ttlbox)
-        trow.pack(fill="x")
-        self.serial_on = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            trow, text="走 TTL 串口", variable=self.serial_on,
-            command=self._on_serial_toggle).pack(side="left")
-        ttk.Label(trow, text="端口：").pack(side="left", padx=(10, 0))
-        self.serial_port = tk.StringVar(value="")
-        self.serial_combo = ttk.Combobox(
-            trow, textvariable=self.serial_port, state="readonly", width=28)
-        self.serial_combo.pack(side="left")
-        ttk.Button(trow, text="刷新", width=6,
-                   command=self.on_refresh_ports).pack(side="left", padx=(4, 0))
-        ttk.Label(trow, text="波特率：").pack(side="left", padx=(10, 0))
-        self.serial_baud = tk.StringVar(value="115200")
-        ttk.Combobox(trow, textvariable=self.serial_baud, state="readonly",
-                     width=8, values=list(serial_shell.BAUD_RATES)
-                     ).pack(side="left")
-
-        self.serial_hint = ttk.Label(ttlbox, text="", foreground="#666",
-                                     wraplength=940, justify="left")
-        self.serial_hint.pack(anchor="w", pady=(4, 0))
-
-        # ===== 刷机 =====
-        flashbox = ttk.LabelFrame(outer, text="刷机（危险）", padding=8)
+        # ===== 刷机（tcboot.bin 写 mtd0，只对贝尔移动版有效）=====
+        flashbox = ttk.LabelFrame(
+            outer, text="刷机（危险 · tcboot.bin 写 mtd0，仅贝尔移动版适用）",
+            padding=8)
         flashbox.pack(fill="x", pady=(8, 0))
 
         self.allow_flash = tk.BooleanVar(value=False)
@@ -344,7 +322,7 @@ class App:
             side="left", padx=(4, 0))
 
         self.btn_flash = ttk.Button(
-            flashbox, text="③ 刷写 U-Boot", width=18, command=self.on_flash,
+            flashbox, text="刷写 U-Boot", width=18, command=self.on_flash,
             state="disabled")
         self.btn_flash.pack(anchor="w", pady=(8, 0))
 
@@ -357,17 +335,145 @@ class App:
             variable=self.auto_reboot, command=self.on_toggle_auto_reboot)
         self.auto_reboot_check.pack(anchor="w", pady=(8, 0))
 
-        self.flash_note = ttk.Label(flashbox, text="", foreground="#a00")
+        self.flash_note = ttk.Label(
+            flashbox, foreground="#a00",
+            text="刷写前请确认已按上方提示恢复出厂设置；点击后会弹出确认框。")
         self.flash_note.pack(anchor="w", pady=(6, 0))
 
+    # ---------- 烽火 tab ----------
+    def _build_fh_tab(self, outer):
+        self.fh_tip = self._tip_bar(
+            outer,
+            "提示：请先恢复光猫出厂设置\n"
+            "按住光猫 reset 键 20 秒以上，让网页超级密码回到默认值"
+            "（telecomadmin / nE7jA%5m）。\n"
+            "本页只需要四项：光猫地址、光猫 MAC、网页超级账号、网页超级密码 —— "
+            "telnet 密码与提权密码都由程序按机型规则推导，不用你填。")
 
-        # ===== 日志 =====
-        logbox = ttk.LabelFrame(outer, text="运行日志", padding=6)
-        logbox.pack(fill="both", expand=True, pady=(8, 0))
-        self.log = scrolledtext.ScrolledText(
-            logbox, height=9, wrap="word", state="disabled",
-            font=("Consolas", 9))
-        self.log.pack(fill="both", expand=True)
+        acct = ttk.LabelFrame(
+            outer, text="必填（保存在 config.ini 的 [fh]）", padding=8)
+        acct.pack(fill="x")
+
+        rows = [
+            ("fh", "router_ip", "光猫地址", False,
+             "光猫的管理地址，默认 192.168.1.1"),
+            ("fh", "mac", "光猫 MAC", False,
+             "用于推导提权密码（Fh@+MAC后6位）；点右边「自动读取」即可"),
+            ("fh", "super_username", "网页超级账号", False,
+             "默认 telecomadmin"),
+            ("fh", "super_password", "网页超级密码", False,
+             "恢复出厂后的默认超级密码，默认 nE7jA%5m"),
+        ]
+        self._build_account_rows(acct, rows, mac_probe=True)
+
+        note = ttk.Label(
+            outer, foreground="#666", justify="left", wraplength=940,
+            text="telnet 账号固定 telnetadmin，密码固定 FH-nE7jA%5m（程序会自动先试固定值，"
+                 "再试带 MAC 后缀的流传写法）；提权 su root 的密码 = Fh@ + MAC 后 6 位大写。"
+                 "本机型不需要开启 FTP。")
+        note.pack(anchor="w", pady=(6, 0))
+
+        # ===== 操作 =====
+        ops = ttk.LabelFrame(
+            outer, text="操作（备份与刷 U-Boot 合并为一步，全部在 stock2ubi 网页里完成）",
+            padding=8)
+        ops.pack(fill="x", pady=(8, 0))
+
+        row = ttk.Frame(ops)
+        row.pack(fill="x")
+        self.btn_fh_telnet = ttk.Button(
+            row, text="① 开启 Telnet", width=16,
+            command=lambda: self.run_fh_mode("telnet"))
+        self.btn_fh_telnet.pack(side="left")
+        self.btn_fh_stock2ubi = ttk.Button(
+            row, text="② 备份并刷 U-Boot（stock2ubi）", width=30,
+            command=self.on_fh_stock2ubi)
+        self.btn_fh_stock2ubi.pack(side="left", padx=6)
+        self.btn_fh_reboot = ttk.Button(
+            row, text="重启光猫", width=12, command=self.on_reboot)
+        self.btn_fh_reboot.pack(side="left")
+
+        row2 = ttk.Frame(ops)
+        row2.pack(fill="x", pady=(8, 0))
+        ttk.Label(row2, text="stock2ubi 文件：").pack(side="left")
+        self.fh_stock2ubi_var = tk.StringVar(value="an758x-stock2ubi")
+        ttk.Entry(row2, textvariable=self.fh_stock2ubi_var,
+                  width=22).pack(side="left")
+        ttk.Label(row2, text="（放在程序同目录）", foreground="#666").pack(
+            side="left", padx=(4, 0))
+
+        self.fh_hint = ttk.Label(ops, foreground="#666", wraplength=940,
+                                 justify="left", text="")
+        self.fh_hint.pack(anchor="w", pady=(6, 0))
+
+        linkrow = ttk.Frame(ops)
+        linkrow.pack(anchor="w", pady=(4, 0))
+        ttk.Label(linkrow, text="相关项目：", foreground="#666").pack(side="left")
+        self._link_label(
+            linkrow,
+            "an758x-stock2ubi（备份分区 + 刷 U-Boot 的网页工具）",
+            "https://github.com/pbs05/an758x-stock2ubi"
+        ).pack(side="left")
+
+        # ===== 断电警告（常驻，红底）=====
+        # 用户明确要求：这条必须写在界面上，因为教程没写清楚导致群里很多人变砖。
+        warn = tk.Frame(outer, bg="#fdecea", highlightbackground="#d93025",
+                        highlightthickness=2)
+        warn.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            warn, bg="#fdecea", fg="#a50e0e", justify="left", anchor="w",
+            wraplength=900, font=("", 10, "bold"),
+            text="⚠️ 刷机过程中绝对不能断电！\n"
+                 "重启后必须立刻访问 http://192.168.0.1 继续完成安装，"
+                 "不能中途拔电或关浏览器。\n"
+                 "若停在 192.168.0.1 恢复页却不继续安装、或中途断电，"
+                 "光猫会变成砖头，只能用 XMODEM 模式救砖（需拆机接串口，"
+                 "耗时且不保证成功）。\n"
+                 "这是本项目作者和群里多位群友踩过的坑，请务必照做。"
+        ).pack(fill="x", padx=10, pady=8)
+
+    # ---------- 账号行（两个 tab 共用）----------
+    def _build_account_rows(self, parent, rows, mac_probe=False):
+        """按 (section, key, label, secret, hint) 生成表单行。
+
+        mac_probe=True 时在 MAC 那一行右边加「自动读取」按钮。
+        """
+        for r, (section, key, label, secret, hint) in enumerate(rows):
+            ttk.Label(parent, text=label + "：").grid(
+                row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+            var = tk.StringVar()
+            self.vars[(section, key)] = var
+            ent = ttk.Entry(parent, textvariable=var, width=38,
+                            show="*" if secret else "")
+            ent.grid(row=r, column=1, sticky="we", pady=3)
+            cell = ttk.Frame(parent)
+            cell.grid(row=r, column=2, sticky="w", padx=(8, 0), pady=3)
+            hint_lbl = ttk.Label(cell, text=hint, foreground="#777")
+            hint_lbl.pack(side="left")
+            self.hint_labels[(section, key)] = hint_lbl
+            if mac_probe and key == "mac":
+                # MAC 输入框保留：自动读取失败时（换了管理口、页面改版、
+                # 电脑没接在 LAN 口）用户仍然可以照背贴手填。
+                self.btn_probe_mac = ttk.Button(
+                    cell, text="自动读取", width=10, command=self.on_probe_mac)
+                self.btn_probe_mac.pack(side="left", padx=(8, 0))
+        parent.columnconfigure(1, weight=1)
+
+        # 铭牌用户账号一变，提权账号自动跟着变成「账号_ftp」。
+        # 只在用户没手工改过提权账号时才覆盖（_su_auto 记录上次自动填的值），
+        # 免得把用户特意填的账号冲掉。
+        # 这个方法两个 tab 各调一次，但联动只属于贝尔那组变量：
+        # 只在贝尔 tab 建完时挂一次 trace，否则烽火 tab 会把同一个 trace
+        # 再挂一遍，账号一改回调就触发两次。
+        if not hasattr(self, "_su_auto"):
+            self._su_auto = None
+        if ("telnet", "username") in self.vars and not getattr(
+                self, "_traces_bound", False):
+            self.vars[("telnet", "username")].trace_add(
+                "write", self._on_username_change)
+            self.vars[("telnet", "su_user")].trace_add(
+                "write", self._on_su_user_change)
+            self._traces_bound = True
 
     # ---------- 可点击链接 ----------
     def _link_label(self, parent, text, url):
@@ -386,220 +492,82 @@ class App:
         except Exception as e:  # noqa: BLE001
             messagebox.showinfo(APP_TITLE, f"请手动打开：\n{url}\n\n（{e}）")
 
-    # ---------- 机型 ----------
-    def _on_model_change(self, *_):
-        """下拉框选中机型后：更新提示文案、字段提示、按钮可用性。
+    # ---------- 机型 / tab ----------
+    def _current_family(self):
+        """当前 tab 对应哪个流程家族："bel" 或 "fh"。"""
+        try:
+            idx = self.notebook.index(self.notebook.select())
+        except Exception:
+            return "bel"
+        return "fh" if idx == 1 else "bel"
 
-        注意这里**不**动用户已经填好的账号密码 —— 用户可能手工改过。
-        要填回机型默认值，点「按此机型填默认值」那个按钮，走显式确认。
-        例外是提权账号：它是自动推导字段（贝尔「账号_ftp」/ 烽火固定 root），
-        留着上一个机型的目标只会 su 到不存在的账号，所以按新机型重置。
-        """
-        name = self.model_var.get()
-        old = self.model
-        for m in models_mod.all_models():
-            if m.name == name:
-                self.model = m
-                break
-        if old.key != self.model.key:
-            self._adopt_model_defaults(old)
+    def _on_tab_change(self, *_):
+        """切 tab 时同步 self.model 并存进配置（下次启动回到这个 tab）。"""
+        fam = self._current_family()
+        self.model = models_mod.get("hg5585f" if fam == "fh" else "bel")
         self.cfg.set("device", "model", self.model.key)
+        try:
+            cfgmod.save(self.cfg, os.path.join(_resource_dir(), cfgmod.CONFIG_FILE))
+        except Exception:
+            pass
         self._apply_model_to_ui()
 
-    def _model_field_values(self, m):
-        """某机型下各「机型身份字段」应有的值。
-
-        这些字段不是用户自由填写的，而是机型决定的（账号名、默认密码、
-        管理地址、提权目标）。切换机型时必须跟着换，否则会拿贝尔的
-        CMCCAdmin 去登烽火、或者 su 到一个不存在的账号。
-        """
-        mac = self._model_mac()
-        return {
-            ("device", "router_ip"): m.router_ip,
-            ("telnet", "username"): m.telnet_user,
-            ("telnet", "password"):
-                models_mod.derive_telnet_password(m, mac) or m.telnet_password,
-            ("telnet", "su_user"):
-                (f"{m.telnet_user}_ftp" if m.su_user_follows_telnet
-                 else m.su_user),
-            ("telnet", "root_password"): models_mod.derive_su_password(m, mac),
-            ("super", "username"): m.super_user,
-            ("super", "password"): m.super_password,
-        }
-
-    def _adopt_model_defaults(self, old):
-        """切换机型：只替换「还是上一个机型默认值」的字段。
-
-        判据是「当前值 == 旧机型该字段的值」或「为空」。用户手工改过的
-        字段（值不等于旧默认值）一律保持不动，不会被切换冲掉。
-        这正是 su 自动跟随那套逻辑的推广版。
-        """
-        old_vals = self._model_field_values(old)
-        new_vals = self._model_field_values(self.model)
-        for key, old_val in old_vals.items():
-            var = self.vars.get(key)
-            if var is None:
-                continue
-            cur = var.get()
-            if cur == old_val or cur == "":
-                new_val = new_vals.get(key, "")
-                if new_val or cur == old_val:
-                    var.set(new_val)
-        # su 自动跟随状态重新同步（_adopt 已经把值改好了）
-        uname = self.vars[("telnet", "username")].get().strip()
-        su = self.vars[("telnet", "su_user")].get().strip()
-        self._su_auto = f"{uname}_ftp" if su == f"{uname}_ftp" else None
-
     def _apply_model_to_ui(self):
-        """把当前机型的特征反映到界面上（提示、字段提示、功能开关）。"""
+        """把当前机型的特征反映到界面上（提示、功能开关）。
+
+        tab 重构后，提示文案是**静态**写在各自 tab 里的（两个机型差别太大，
+        没必要再动态改写）；这里只负责按钮可用性和刷机区灰化。
+        """
         m = self.model
-
-        # 顶部出厂提示：两个厂商的超级密码不同，必须跟着换
-        if m.super_user and m.super_password:
-            # 只有支持网页开 telnet 的机型才说「程序会自动开启」
-            if m.supports_web_telnet:
-                tail = ("程序才能自动登录网页开启 Telnet"
-                        + ("与 FTP。" if m.need_ftp_for_su else "。"))
-            else:
-                tail = ("程序才能自动登录网页读取设备信息、执行备份；"
-                        "本机型需你自行开启 Telnet。")
-            self.tip_label.configure(
-                text="提示：请先恢复光猫出厂设置\n"
-                     f"按住光猫 reset 键 20 秒以上，让超级管理员密码回到默认值"
-                     f"（{m.super_user} / {m.super_password}），{tail}")
-        else:
-            self.tip_label.configure(text="提示：请先恢复光猫出厂设置。")
-
-        # 操作区提示也跟着机型变：别说「会自动开 Telnet 与 FTP」然后其实没开
-        if "ops_hint" in self.hint_labels:
-            if m.supports_web_telnet and m.need_ftp_for_su:
-                t = ("提示：备份需要 root，程序会自动开启 Telnet 与 FTP；"
-                     "若你已手动开过其中一个，点对应的单个按钮即可。")
-            elif m.supports_web_telnet:
-                t = "提示：备份需要 root，程序会自动开启 Telnet。"
-            elif m.need_ftp_for_su:
-                t = "提示：备份需要 root，程序会自动开启 FTP。"
-            else:
-                t = ("提示：本机型需要你先手动开启 Telnet，"
-                     "程序才能登录并提权做备份（提权用 su root）。")
-            self.hint_labels["ops_hint"].configure(text=t)
-
-        # 机型说明（note）
-        extra = ""
-        if models_mod.mac_required(m):
-            extra = ("\n⚠ 本机型需要填「光猫 MAC」：telnet 密码与提权密码都由 "
-                     "MAC 后 6 位推导，不填无法登录。")
-        self.model_note.configure(text=(m.note or "") + extra)
-
-        # 字段提示：su 账号是否跟随 telnet 账号、MAC 是否必填
-        if ("telnet", "su_user") in self.hint_labels:
-            self.hint_labels[("telnet", "su_user")].configure(
-                text=("自动填成「铭牌用户账号_ftp」，即拿到 root 的账号"
-                      if m.su_user_follows_telnet
-                      else f"本机型固定为 {m.su_user}（不跟随铭牌账号）"))
-        if ("device", "mac") in self.hint_labels:
-            self.hint_labels[("device", "mac")].configure(
-                text=("本机型必填：telnet / su 密码由 MAC 后 6 位推导"
-                      if models_mod.mac_required(m)
-                      else "可选；本机型不需要"))
-        if ("super", "password") in self.hint_labels:
-            if m.supports_web_telnet:
-                t = ("恢复出厂后的默认超级密码，用于自动开启 Telnet"
-                     + (" / FTP" if m.need_ftp_for_su else ""))
-            else:
-                t = "恢复出厂后的默认超级密码（本机型用于登录网页）"
-            self.hint_labels[("super", "password")].configure(text=t)
-
-        # 刷机区：本机型不支持刷 tcboot 时把控件灰掉，并说明该用哪条路
-        supported = m.supports_uboot_flash
-        if getattr(self, "uboot_entry", None) is not None:
-            self.uboot_entry.configure(state="normal" if supported else "disabled")
-        if getattr(self, "flash_check", None) is not None:
-            self.flash_check.configure(state="normal" if supported else "disabled")
-        if getattr(self, "flash_note", None) is not None:
-            if supported:
-                self.flash_note.configure(
-                    text="刷写前请确认已按上方提示恢复出厂设置；点击后会弹出确认框。",
-                    foreground="#a00")
-            else:
-                self.flash_note.configure(
-                    text=f"本机型不走 tcboot：请用上面的「④ 运行 stock2ubi 刷 U-Boot」，"
-                         f"在它自己的网页里刷。",
-                    foreground="#666")
-
-        # 功能开关：该机型不支持的功能直接禁用，别让用户点了才发现不行
-        # 走 TTL 串口时，开 Telnet / 开 FTP 这两步本来就要跳过，也一并灰掉。
-        on_serial = bool(getattr(self, "serial_on", None) and self.serial_on.get())
-        self.btn_telnet.configure(
-            state="normal" if (m.supports_web_telnet and not on_serial)
-            else "disabled")
-        self.btn_ftp.configure(
-            state="normal" if (m.need_ftp_for_su and not on_serial)
-            else "disabled")
-        self.btn_stock2ubi.configure(
-            state="normal" if m.supports_stock2ubi else "disabled")
-        # 刷写 tcboot 只对贝尔有意义（烽火没有 tcboot 分区表那套）
         self._flash_supported = m.supports_uboot_flash
+        # 刷机区只存在于贝尔 tab；烽火 tab 里没有这些控件
+        if getattr(self, "flash_check", None) is not None:
+            self.flash_check.configure(
+                state="normal" if m.supports_uboot_flash else "disabled")
+        if getattr(self, "uboot_entry", None) is not None:
+            self.uboot_entry.configure(
+                state="normal" if m.supports_uboot_flash else "disabled")
+        # 烽火 tab 的操作提示
+        if getattr(self, "fh_hint", None) is not None:
+            if m.supports_stock2ubi:
+                t = ("提示：② 会先把 an758x-stock2ubi 上传到光猫并启动，"
+                     "然后自动打开它的网页。备份分区、上传 U-Boot、重启进恢复页"
+                     "都在那个网页里完成 —— 请一直跟着网页走，中途不要断电。")
+            else:
+                t = "提示：本机型暂不支持自动刷写。"
+            self.fh_hint.configure(text=t)
         self.on_toggle_flash()
 
-    def on_fill_model_defaults(self):
-        """按当前机型填默认账号密码（会覆盖表单里的值，先确认）。"""
-        m = self.model
-        if not messagebox.askyesno(
-                APP_TITLE,
-                f"用「{m.name}」的默认值覆盖当前表单？\n\n"
-                "地址、账号、密码都会被替换（不影响已保存的 config.ini，"
-                "要保存请点「保存配置」）。"):
-            return
-        d = cfgmod.model_defaults(m)
-        for section, kv in d.items():
-            for key, val in kv.items():
-                var = self.vars.get((section, key))
-                if var is not None:
-                    var.set(val)
-        # MAC 不能猜，但保留用户已填的值
-        self.log_line(f"[*] 已填入机型默认值：{m.name}\n")
-        self.log_line(f"    如需 MAC 推导密码，请填好「光猫 MAC」后点「保存配置」。\n")
-
     def _model_mac(self):
-        return self.vars[("device", "mac")].get().strip()
+        return self.vars[("fh", "mac")].get().strip()
 
     def _derive_passwords_if_needed(self):
-        """烽火机型：按 MAC 推导 telnet 密码与 su 密码，写回表单。
+        """烽火：校验 MAC 是否已填（密码由程序推导，不需要用户填）。
 
-        只在对应字段**为空**时才填，避免覆盖用户手填的值。
-        返回 (ok, 错误说明)。
+        telnet 密码是固定值，su 密码 = Fh@+MAC后6位，所以唯一必须有的是 MAC。
+        MAC 不合法就拦下 —— 否则会拿空密码去连，白白烧认证机会
+        （连续 3 次失败锁 300 秒）。
         """
-        m = self.model
-        # 走 TTL 串口时既不用 telnet 也不用超级密码，MAC 推导完全没必要，
-        # 不能因为没填 MAC 就把用户拦在门外（串口本身已经是 root）。
-        if getattr(self, "serial_on", None) is not None and self.serial_on.get():
-            return True, ""
-        if not models_mod.mac_required(m):
+        if self._current_family() != "fh":
             return True, ""
         mac = self._model_mac()
         if not models_mod.normalize_mac(mac):
-            return False, ("本机型需要「光猫 MAC」（背面标签上，"
-                           "例如 70:D5:1E:04:6C:EC），否则推导不出 telnet 密码。")
-        if m.telnet_password_from_mac:
-            var = self.vars[("telnet", "password")]
-            if not var.get().strip():
-                var.set(models_mod.derive_telnet_password(m, mac))
-        if m.su_password_from_mac:
-            var = self.vars[("telnet", "root_password")]
-            if not var.get().strip():
-                var.set(models_mod.derive_su_password(m, mac))
+            return False, ("烽火机型需要「光猫 MAC」（形如 70:D5:1E:04:6C:EC），"
+                           "否则推导不出提权密码。\n\n"
+                           "点 MAC 输入框右边的「自动读取」可从设备直接读回；"
+                           "读不到就照光猫背面标签手填。")
+        if len(models_mod.normalize_mac(mac)) != 12:
+            return False, (f"MAC 格式不对：{mac}\n"
+                           "需要 12 位十六进制（可带 : 或 - 分隔），"
+                           "例如 70:D5:1E:04:6C:EC。")
         return True, ""
 
-    # ---------- 提权账号自动跟随铭牌账号 ----------
+    # ---------- 提权账号自动跟随铭牌账号（贝尔）----------
     def _on_username_change(self, *_):
-        """铭牌用户账号变化 → 提权账号自动设为「账号_ftp」。
-
-        仅当提权账号当前值等于上次自动填入的值（或为空）时才覆盖，
-        这样用户手工改过的提权账号不会被冲掉。
-        烽火机型 su 目标固定是 root，不跟随（见 models.Model.su_user_follows_telnet）。
-        """
+        """铭牌用户账号变化 → 提权账号自动设为「账号_ftp」。"""
         if not self.model.su_user_follows_telnet:
+            return
+        if ("telnet", "username") not in self.vars:
             return
         uname = self.vars[("telnet", "username")].get().strip()
         cur = self.vars[("telnet", "su_user")].get().strip()
@@ -609,6 +577,8 @@ class App:
 
     def _on_su_user_change(self, *_):
         """用户手工改了提权账号 → 记住它，之后不再自动覆盖。"""
+        if ("telnet", "su_user") not in self.vars:
+            return
         cur = self.vars[("telnet", "su_user")].get().strip()
         if cur != self._su_auto:
             self._su_auto = None
@@ -616,23 +586,30 @@ class App:
     # ---------- 配置读写 ----------
     def _load_into_ui(self):
         for (section, key), var in self.vars.items():
-            var.set(self.cfg.get(section, key))
+            try:
+                var.set(self.cfg.get(section, key))
+            except Exception:
+                pass
         # 载入后同步自动推导状态：若配置里的提权账号正好等于
         # 「铭牌账号_ftp」，就认作自动值，之后账号一改它还会跟着走。
-        uname = self.vars[("telnet", "username")].get().strip()
-        su = self.vars[("telnet", "su_user")].get().strip()
-        self._su_auto = f"{uname}_ftp" if su == f"{uname}_ftp" else None
-        # 机型下拉框与提示跟着配置走
-        self.model = models_mod.get(self.cfg.get("device", "model"))
-        self.model_var.set(self.model.name)
-        self.auto_reboot.set(
-            cfgmod.get_bool(self.cfg, "safety", "auto_reboot_on_login_fail", True))
-        # TTL 串口设置
+        if ("telnet", "username") in self.vars:
+            uname = self.vars[("telnet", "username")].get().strip()
+            su = self.vars[("telnet", "su_user")].get().strip()
+            self._su_auto = f"{uname}_ftp" if su == f"{uname}_ftp" else None
+        # 上次用的是哪个 tab 就回到哪个 tab
+        last = self.cfg.get("device", "model")
+        idx = 1 if last == "hg5585f" else 0
+        try:
+            self.notebook.select(idx)
+        except Exception:
+            pass
+        self.model = models_mod.get("hg5585f" if idx == 1 else "bel")
+        if getattr(self, "auto_reboot", None) is not None:
+            self.auto_reboot.set(cfgmod.get_bool(
+                self.cfg, "safety", "auto_reboot_on_login_fail", True))
+        # TTL 串口：控件暂时不显示，但变量仍要跟上配置（功能代码保留）
         self.serial_on.set(cfgmod.get_bool(self.cfg, "serial", "enabled", False))
         self.serial_baud.set(self.cfg.get("serial", "baudrate") or "115200")
-        # 先刷新端口列表（否则下拉框是空的），再把保存的端口填回去 ——
-        # 刷新时若只有一个串口会自动选中，不能用它覆盖用户上次的选择。
-        self.on_refresh_ports()
         saved_port = self.cfg.get("serial", "port").strip()
         if saved_port:
             self.serial_port.set(saved_port)
@@ -641,8 +618,10 @@ class App:
     def _save_from_ui(self):
         for (section, key), var in self.vars.items():
             self.cfg.set(section, key, var.get())
-        self.cfg.set("safety", "auto_reboot_on_login_fail",
-                     "true" if self.auto_reboot.get() else "false")
+        self.cfg.set("device", "model", self.model.key)
+        if getattr(self, "auto_reboot", None) is not None:
+            self.cfg.set("safety", "auto_reboot_on_login_fail",
+                         "true" if self.auto_reboot.get() else "false")
         self.cfg.set("serial", "enabled",
                      "true" if self.serial_on.get() else "false")
         self.cfg.set("serial", "port", self.serial_port.get().strip())
@@ -677,11 +656,76 @@ class App:
         self.log_line("[*] 已重新载入配置\n")
 
     def on_reset(self):
-        if not messagebox.askyesno(APP_TITLE, "恢复为默认账号密码？当前修改会丢失。"):
+        if not messagebox.askyesno(
+                APP_TITLE, "恢复为默认账号密码？当前修改会丢失。"):
             return
         self.cfg = cfgmod.load("__no_such_file__")  # 强制用默认值
         self._load_into_ui()
         self.log_line("[*] 已恢复默认配置（记得点保存）\n")
+
+    # ---------- 自动读取 MAC（烽火 tab）----------
+    def on_probe_mac(self):
+        """从设备只读地读回 MAC 并填进表单（烽火 8080 的 web_get_brmad）。
+
+        为什么要有这个按钮：烽火的提权密码由 MAC 推导，而 MAC 抄错一位算出来
+        的 AES 密钥就全错，设备只回一个 403 —— 从错误信息完全看不出是
+        「抄错」还是「协议不对」。设备自己就能报出 MAC，没理由让用户去背贴上找。
+        但输入框仍然保留：换了管理口 / 页面改版 / 电脑没接 LAN 口时，
+        自动读不到，用户还能照标签手填。
+        """
+        ip = self.vars[("fh", "router_ip")].get().strip() or "192.168.1.1"
+        port = getattr(models_mod.get("hg5585f"), "web_port", 8080) or 8080
+        self.log_line(f"[*] 正在从 {ip}:{port} 读取 MAC ...\n")
+        self.btn_probe_mac.configure(state="disabled")
+
+        # 结果先放盒子，由**主线程**的 after 轮询取走。
+        # 不能在子线程里直接调 root.after()/控件方法：Tk 不是线程安全的，
+        # 从非主线程调用会抛 "main thread is not in main loop"（实测踩过）。
+        box = {}
+
+        def _work():
+            try:
+                import fhtool
+                box["mac"] = fhtool.probe_mac(ip, port=port, timeout=6.0)
+            except Exception as e:  # noqa: BLE001
+                box["err"] = f"{type(e).__name__}: {e}"
+                box["mac"] = ""
+
+        def _poll(tries=0):
+            if "mac" not in box and "err" not in box:
+                if tries < 80:                    # 最多等约 16 秒
+                    self.root.after(200, lambda: _poll(tries + 1))
+                else:
+                    self.btn_probe_mac.configure(state="normal")
+                    self._probe_mac_failed()
+                return
+            self.btn_probe_mac.configure(state="normal")
+            if box.get("err"):
+                self.log_line(f"[!] 读取失败：{box['err']}\n")
+            mac = box.get("mac") or ""
+            if mac:
+                self._apply_probed_mac(mac)
+            else:
+                self._probe_mac_failed()
+
+        threading.Thread(target=_work, daemon=True).start()
+        self.root.after(200, _poll)
+
+    def _apply_probed_mac(self, mac):
+        self.vars[("fh", "mac")].set(mac)
+        self.log_line(f"[✓] 读到 MAC: {mac}\n")
+        self.log_line("[*] 提权密码 = Fh@ + 后 6 位 = "
+                      f"Fh@{models_mod.mac_suffix(mac)}\n")
+
+    def _probe_mac_failed(self):
+        self.log_line("[!] 没能从设备读到 MAC。\n")
+        self.log_line("    请确认电脑直连光猫 LAN 口、地址填的是光猫的管理地址；\n")
+        self.log_line("    也可以照光猫背面标签手填（形如 70:D5:1E:04:6C:EC）。\n")
+        messagebox.showwarning(
+            APP_TITLE,
+            "没能自动读到 MAC。\n\n"
+            "请确认电脑直连光猫 LAN 口，并检查「光猫地址」是否填对；\n"
+            "也可以照光猫背面标签手工填写 MAC。")
 
     # ---------- 日志 ----------
     def log_line(self, text):
@@ -704,13 +748,17 @@ class App:
     # ---------- 线程与状态 ----------
     def _set_busy(self, busy):
         state = "disabled" if busy else "normal"
-        # 操作按钮都要跟着忙闲切换（漏掉某个会让它在运行时仍可点）
-        for b in (self.btn_telnet, self.btn_ftp, self.btn_backup,
-                  self.btn_reboot, self.btn_stock2ubi):
-            b.configure(state=state)
+        # 两个 tab 的按钮都要跟着忙闲切换（漏掉某个会让它在运行时仍可点）
+        for name in ("btn_telnet", "btn_ftp", "btn_backup", "btn_reboot",
+                     "btn_stock2ubi", "btn_probe_mac", "btn_fh_telnet",
+                     "btn_fh_stock2ubi", "btn_fh_reboot"):
+            b = getattr(self, name, None)
+            if b is not None:
+                b.configure(state=state)
         # 刷机按钮还要看勾选框
         if busy:
-            self.btn_flash.configure(state="disabled")
+            if getattr(self, "btn_flash", None) is not None:
+                self.btn_flash.configure(state="disabled")
         else:
             self.on_toggle_flash()
 
@@ -749,18 +797,23 @@ class App:
             spec = importlib.util.spec_from_file_location("flash", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            # flash.py 内部用 __file__ 决定工作目录，这里已在 main() 里 chdir
             self.flash = mod
-        # 先按机型打底（端口、su 方式、功能开关），再用用户配置覆盖
-        cfgmod.apply_model(self.cfg, self.flash, self.model)
-        cfgmod.apply_to_flash(self.cfg, self.flash)
+        # 两个 tab 用**两套完全独立**的写配置函数：
+        #   贝尔 → apply_model（机型档案打底）+ apply_to_flash（[device]/[telnet]/[super]）
+        #   烽火 → apply_fh_to_flash（只读 [fh] 段，绝不碰贝尔那组键）
+        # 混用会让在一个 tab 保存的值冲掉另一个 tab 的账号密码。
+        if self._current_family() == "fh":
+            cfgmod.apply_fh_to_flash(self.cfg, self.flash)
+        else:
+            cfgmod.apply_model(self.cfg, self.flash, self.model)
+            cfgmod.apply_to_flash(self.cfg, self.flash)
         return self.flash
 
     def _prepare(self):
         """保存配置 + 校验机型必需的字段 + 加载 flash 模块。
 
         返回 flash 模块；失败时弹框并返回 None。
-        烽火机型没填 MAC 就直接拦下 —— 否则会拿着空密码去连 telnet，
+        烽火 tab 没填 MAC 就直接拦下 —— 否则会拿着空密码去连 telnet，
         白白消耗认证机会（连续 3 次失败要锁 300 秒）。
         """
         try:
@@ -774,47 +827,48 @@ class App:
             messagebox.showerror(APP_TITLE, f"初始化失败：{e}")
             return None
 
-    # ---------- TTL 串口 ----------
+    # ---------- TTL 串口（界面暂时隐藏，代码保留）----------
     def on_refresh_ports(self):
-        """重新枚举串口并填进下拉框（不自动选中任何一个）。"""
+        """重新枚举串口并填进下拉框（界面隐藏后只可能被代码调用）。"""
+        combo = getattr(self, "serial_combo", None)
+        if combo is None:
+            return
         ports = serial_shell.list_ports()
-        values = [f"{dev}" for dev, _ in ports]
-        self.serial_combo.configure(values=values)
+        combo.configure(values=[f"{dev}" for dev, _ in ports])
+        hint = getattr(self, "serial_hint", None)
+        if hint is None:
+            return
         if not serial_shell.available():
-            self.serial_hint.configure(
+            hint.configure(
                 text="没有安装 pyserial，TTL 功能不可用。安装：pip install pyserial",
                 foreground="#a00")
             self.serial_port.set("")
             return
         if not ports:
-            self.serial_hint.configure(
-                text="没有发现串口设备。请插上 USB-TTL 线，再点「刷新」。",
-                foreground="#a00")
+            hint.configure(text="没有发现串口设备。请插上 USB-TTL 线，再点「刷新」。",
+                           foreground="#a00")
             self.serial_port.set("")
             return
         desc = "；".join(f"{dev} = {d}" for dev, d in ports)
-        self.serial_hint.configure(
-            text=f"发现 {len(ports)} 个串口：{desc}\n"
-                 "请自己选一个（程序不猜）。常见 USB-TTL 芯片是 CH340 / CP2102 / FT232。",
-            foreground="#666")
-        # 只有一个串口时替用户选上，省一步点击；多个时保持空，必须自己选。
-        if len(ports) == 1:
-            self.serial_port.set(values[0])
-        elif self.serial_port.get() not in values:
-            self.serial_port.set("")
+        hint.configure(text=f"发现 {len(ports)} 个串口：{desc}", foreground="#666")
 
     def _on_serial_toggle(self):
         """勾上「走 TTL 串口」后，联网相关的按钮就该灰掉。"""
         on = bool(self.serial_on.get())
         if on:
             self.on_refresh_ports()
-        for b in (self.btn_telnet, self.btn_ftp):
-            b.configure(state="disabled" if on else "normal")
-        self.serial_combo.configure(state="readonly" if on else "readonly")
+        for name in ("btn_telnet", "btn_ftp", "btn_fh_telnet"):
+            b = getattr(self, name, None)
+            if b is not None:
+                b.configure(state="disabled" if on else "normal")
         self._apply_model_to_ui()
 
     def _serial_args(self):
-        """把界面上的串口设置变成 run_flow 认的 args 片段。"""
+        """把界面上的串口设置变成 run_flow 认的 args 片段。
+
+        TTL 界面按用户要求暂时隐藏，serial_on 永远是 False，所以这里正常
+        返回空 dict（= 走 telnet）。功能代码保留，将来取消注释即可启用。
+        """
         if not self.serial_on.get():
             return {}
         port = (self.serial_port.get() or "").strip()
@@ -829,6 +883,7 @@ class App:
 
     # ---------- 各操作 ----------
     def run_mode(self, mode):
+        """贝尔 tab 的四个操作（telnet / ftp / backup）。"""
         flash = self._prepare()
         if flash is None:
             return
@@ -846,6 +901,24 @@ class App:
                  "backup": "备份全部分区"}[mode]
         via = "（TTL 串口）" if serial else ""
         self.log_line(f"\n{'=' * 56}\n[*] 开始：{label}{via}"
+                      f"（机型：{self.model.short}）\n{'=' * 56}\n")
+        self._start_worker(flash.run_flow, args)
+
+    def run_fh_mode(self, mode):
+        """烽火 tab 的操作：目前只有「开启 Telnet」。
+
+        备份和刷 U-Boot 合并进 stock2ubi（见 on_fh_stock2ubi），所以这里
+        没有 backup / flash 分支 —— 烽火刷 tcboot 没有意义（tcboot 只适配
+        贝尔移动版）。
+        """
+        flash = self._prepare()
+        if flash is None:
+            return
+        args = {"mode": mode, "enable_telnet": True, "enable_ftp": False,
+                "yes": False, "reboot": False, "force_backup": False}
+        args.update(self._serial_args() or {})
+        label = {"telnet": "开启 Telnet"}.get(mode, mode)
+        self.log_line(f"\n{'=' * 56}\n[*] 开始：{label}"
                       f"（机型：{self.model.short}）\n{'=' * 56}\n")
         self._start_worker(flash.run_flow, args)
 
@@ -868,13 +941,15 @@ class App:
 
     def on_toggle_flash(self):
         # 机型不支持刷 tcboot（烽火）时，勾选也不给解锁
+        if getattr(self, "btn_flash", None) is None:
+            return
         if self.allow_flash.get() and getattr(self, "_flash_supported", True):
             self.btn_flash.configure(state="normal")
         else:
             self.btn_flash.configure(state="disabled")
 
     def on_flash(self):
-        # 恢复出厂设置的提醒放在界面顶部的固定提示里（不跟刷机按钮绑定）。
+        # 恢复出厂设置的提醒放在 tab 顶部的固定提示里（不跟刷机按钮绑定）。
         # 这里只做刷机本身该做的确认。
         flash = self._prepare()
         if flash is None:
@@ -902,6 +977,7 @@ class App:
                 f"文件：{uboot}（{size} 字节）\n"
                 "目标：/dev/mtdblock0\n\n"
                 "⚠️ 写入不可逆，断电或写错会导致设备变砖！\n"
+                "⚠️ 刷写过程中绝对不能断电！\n"
                 "程序会先做全分区备份，但仍请确认已备份重要数据。\n\n"
                 "确定现在刷写吗？"):
             self.log_line("[*] 已取消刷机（未做任何写入）。\n")
@@ -918,8 +994,16 @@ class App:
         self.log_line(f"\n{'=' * 56}\n[!] 开始刷写 U-Boot：{uboot}{via}\n{'=' * 56}\n")
         self._start_worker(flash.run_flow, args)
 
+    def _stock2ubi_args(self, name, flash):
+        return {"mode": "stock2ubi",
+                "enable_telnet": True,
+                "enable_ftp": bool(flash.NEED_FTP_FOR_SU),
+                "yes": False, "reboot": False, "force_backup": False,
+                "stock2ubi_file": name,
+                "stock2ubi_ignore_kernel": False}
+
     def on_stock2ubi(self):
-        """上传 an758x-stock2ubi 并后台运行，之后在它自己的网页里刷 U-Boot。
+        """贝尔 tab：上传 an758x-stock2ubi 并后台运行。
 
         本工具只负责把它送上去跑起来；真正的刷写动作在它的网页里完成，
         所以这里不锁定、也不需要勾选「启用刷机功能」。
@@ -946,19 +1030,63 @@ class App:
                 "它会在设备上开一个网页，刷写 U-Boot 在**那个网页里**完成：\n"
                 "先备份分区，再上传 preloader.bin / firstblock.bin 与 "
                 "bl31-u-boot.fip。\n\n"
-                "这一步本身不写入任何分区，但后续刷写有变砖风险。\n"
-                "确定继续吗？"):
+                "⚠️ 刷写过程中绝对不能断电！\n"
+                "⚠️ 重启后必须访问 http://192.168.0.1 继续安装，不能中途放弃，\n"
+                "    否则光猫会变砖，只能用 XMODEM 模式救砖。\n\n"
+                "这一步本身不写入任何分区，确定继续吗？"):
             self.log_line("[*] 已取消。\n")
             return
 
-        args = {"mode": "stock2ubi",
-                "enable_telnet": flash.AUTO_ENABLE_TELNET,
-                "enable_ftp": flash.AUTO_ENABLE_FTP, "yes": False,
-                "reboot": False, "force_backup": False,
-                "stock2ubi_file": name,
-                "stock2ubi_ignore_kernel": False}
+        args = self._stock2ubi_args(name, flash)
         self.log_line(f"\n{'=' * 56}\n"
                       f"[*] 开始：运行 an758x-stock2ubi（{name}）\n"
+                      f"{'=' * 56}\n")
+        self._start_worker(flash.run_flow, args)
+
+    def on_fh_stock2ubi(self):
+        """烽火 tab：备份 + 刷 U-Boot 合并为一步（全部走 stock2ubi 网页）。
+
+        为什么合并：烽火没有 tcboot.bin 那套（tcboot 只适配贝尔移动版），
+        备份分区和写 preloader / U-Boot 都由 an758x-stock2ubi 的网页完成，
+        对本工具来说就是「把工具送上去跑起来 + 打开网页」一件事。
+        后续适配 AN7581 家族（HG5382A 等）也走这条。
+        """
+        flash = self._prepare()
+        if flash is None:
+            return
+
+        name = self.fh_stock2ubi_var.get().strip() or "an758x-stock2ubi"
+        path = find_resource(name)
+        if not path:
+            messagebox.showerror(
+                APP_TITLE,
+                f"找不到文件：{name}\n\n"
+                f"请把 an758x-stock2ubi 放在程序同目录：\n{_resource_dir()}\n\n"
+                f"下载地址：\n{flash.STOCK2UBI_PROJECT_URL}")
+            return
+
+        if not messagebox.askyesno(
+                APP_TITLE,
+                "即将备份并进入刷 U-Boot 流程\n\n"
+                f"文件：{name}（{os.path.getsize(path)} 字节）\n"
+                f"运行位置：光猫 /tmp，监听端口 {flash.STOCK2UBI_PORT}\n\n"
+                "接下来会在浏览器里打开 an758x-stock2ubi 的网页，"
+                "请按网页顺序操作：\n"
+                "  1. 备份需要保留的分区；\n"
+                "  2. 上传对应机型的 preloader.bin / firstblock.bin 与 "
+                "bl31-u-boot.fip；\n"
+                "  3. 重启后立刻访问 http://192.168.0.1 继续完成安装。\n\n"
+                "⚠️ 整个过程绝对不能断电！\n"
+                "⚠️ 重启后若停在 192.168.0.1 恢复页却不继续安装，"
+                "光猫会变砖，\n"
+                "    只能用 XMODEM 模式救砖（需拆机接串口）。\n\n"
+                "确定开始吗？"):
+            self.log_line("[*] 已取消。\n")
+            return
+
+        args = self._stock2ubi_args(name, flash)
+        self.log_line(f"\n{'=' * 56}\n"
+                      f"[*] 开始：烽火 备份 + 刷 U-Boot（{name}）\n"
                       f"{'=' * 56}\n")
         self._start_worker(flash.run_flow, args)
 

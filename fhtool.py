@@ -17,6 +17,9 @@
 """
 
 
+import re
+
+
 class FhToolUnavailable(RuntimeError):
     """没装 fh_tool_cli 或版本不兼容。"""
 
@@ -49,6 +52,48 @@ def available():
 def normalize_mac(mac):
     """统一成无分隔符大写（fh_tool 的 AES 密钥就是拿这个字符串算的）。"""
     return "".join(ch for ch in (mac or "") if ch.isalnum()).upper()
+
+
+def probe_mac(ip, port=8080, timeout=6.0):
+    """从设备上**只读**地读回 MAC（无分隔符大写 12 位），失败返回空串。
+
+    为什么能读到：烽火在 8080 上有一个**不需要任何认证**的 AJAX 接口
+    `GET /cgi-bin/ajax?ajaxmethod=web_get_brmad`，返回
+    `{"brmad": "70D51E046CEC", ...}`。这个接口本来就是给网页 JS 拿 MAC 用的
+    —— 而 MAC 正是 fh_tool 加密的密钥种子，所以「能访问 8080」就等于
+    「能算出密钥」，这也是 fh_tool 无需登录就能改配置的根本原因。
+
+    拿到 MAC 后就不必再让用户去机壳背贴上手抄 MAC 了：抄错一位，
+    AES 密钥就全错，设备只会回一个 403，很难看出是抄错还是协议不对。
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{ip}:{int(port)}/cgi-bin/ajax?ajaxmethod=web_get_brmad"
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"http://{ip}:{int(port)}/",
+        })
+        with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError):
+        return ""
+    # 兼容两种返回：纯 JSON，或被包了一层的 JSONP。
+    m = re.search(r'\{[^{}]*"brmad"\s*:\s*"([^"]+)"[^{}]*\}', raw)
+    if m:
+        cand = m.group(1)
+    else:
+        try:
+            cand = (json.loads(raw) or {}).get("brmad", "")
+        except (ValueError, TypeError):
+            return ""
+    cand = normalize_mac(cand)
+    # 必须正好 12 位十六进制，否则说明接口返回了别的东西（登录页 / 404 页面）
+    return cand if re.fullmatch(r"[0-9A-F]{12}", cand) else ""
 
 
 class FhClient:
