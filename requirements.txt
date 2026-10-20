@@ -1,0 +1,9 @@
+# 全部为可选依赖：按机型 / 接入方式安装，缺了只影响对应功能。
+#
+# 烽火 HG5585F（--model hg5585f）：开 Telnet 与读设备信息走 8080 的 fh_tool
+# 加密 RPC，需要这个包。贝尔 XG-040G-MD 不需要。
+fh_tool-cli==0.2.7
+
+# TTL 串口接入（--serial-port / 界面勾「走 TTL 串口」）：把串口包装成与
+# telnet 相同的接口。不走 TTL 时不需要。
+pyserial>=3.5

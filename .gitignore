@@ -26,6 +26,25 @@ _test_verify_loop.py
 _devmgmt.html
 .playwright-mcp
 
+# GUI 冒烟测试与截图（本地调试用）
+_gui_model_test.py
+_gui_adopt_test.py
+_gui_serial_test.py
+_gui_shot.py
+_gui_size.py
+_shot_*.png
+_b33.txt
+
+# 串口 / TFTP / 真机探测等一次性脚本（本地调试用）
+_serial_test.py
+_e2e_serial_backup.py
+_tftp_test.py
+_backup_tftp_test.py
+_probe_after_reset.py
+_polyfill.js
+_xhr.js
+_telsu.tar.gz
+
 # CI / 本地发版时生成的 Release 说明与更新日志片段
 _release_notes.md
 _changelog.md

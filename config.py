@@ -12,10 +12,14 @@ CONFIG_FILE = "config.ini"
 # 默认值（与 flash.py 配置区保持一致，XG-040G-MD 移动版实测值）
 DEFAULTS = {
     "device": {
+        # 机型 id（见 models.py）：bel = 贝尔移动版，hg5585f = 烽火电信版
+        "model": "bel",
         "router_ip": "192.168.1.1",
         "auto_enable_telnet": "true",
         "auto_enable_ftp": "true",
         "skip_backup_if_complete": "true",
+        # 光猫 MAC（烽火机型靠它推导 telnet / su 密码）
+        "mac": "",
     },
     "telnet": {
         # telnet 登录账号（本机型实测为 user，密码在光猫底部铭牌上）
@@ -31,9 +35,21 @@ DEFAULTS = {
         "username": "CMCCAdmin",
         "password": "aDm8H%MdA",
     },
+    "serial": {
+        # TTL 串口（拆机接线）：走这条路时不需要 Telnet / FTP / 超级密码，
+        # 串口本身就是 root shell。端口一律由用户从列表里自己选，不自动探测。
+        "enabled": "false",
+        "port": "",            # 例如 /dev/ttyUSB0（Linux）或 COM3（Windows）
+        "baudrate": "115200",
+    },
     "safety": {
         # 刷机开关：默认关闭，必须在 GUI 里显式勾选才能解锁刷机按钮
         "allow_flash": "false",
+        # telnet 登录失败后自动重启光猫解除锁定（认证失败有阈值，触发后只能
+        # 等或重启；重启 1~3 分钟比干等更可控）
+        "auto_reboot_on_login_fail": "true",
+        # 整个登录过程最多自动重启几次（防止死循环）
+        "auto_reboot_max": "1",
         # 刷写后回读校验：写 mtdblock 后数据要过一会儿才真正进 flash，
         # 所以校验是「轮询等待」而不是读一次。这两个值可按需调大/调小。
         # 实测 512KB 的 U-Boot 几秒到几十秒内生效，120 秒余量充足。
@@ -46,9 +62,9 @@ _SECTION_COMMENTS = {
     "device": "设备与网络",
     "telnet": "telnet 登录与提权账号",
     "super": "网页超级管理员账号（用于自动开启 Telnet / FTP）",
+    "serial": "TTL 串口（拆机接线）",
     "safety": "安全开关",
 }
-
 
 def _new_config():
     # interpolation=None 是必须的：超级密码 aDm8H%MdA 里的 %M 会被默认的
@@ -130,3 +146,62 @@ def apply_to_flash(cfg, flash):
         flash.FLASH_VERIFY_INTERVAL = int(cfg.get("safety", "flash_verify_interval"))
     except Exception:
         pass  # 配置里写了非数字就沿用 flash.py 的默认值
+
+    # TTL 串口：enabled 只影响 GUI 的默认勾选；命令行以 --serial-port 为准
+    flash.SERIAL_PORT = cfg.get("serial", "port").strip()
+    try:
+        flash.SERIAL_BAUD = int(cfg.get("serial", "baudrate") or 115200)
+    except Exception:
+        pass  # 非数字就沿用 flash.py 的默认值
+
+    # telnet 登录失败后自动重启（认证失败有阈值，触发后只能等或重启）
+    flash.AUTO_REBOOT_ON_LOGIN_FAIL = get_bool(
+        cfg, "safety", "auto_reboot_on_login_fail", True)
+    try:
+        flash.AUTO_REBOOT_MAX = max(0, int(cfg.get("safety", "auto_reboot_max")))
+    except Exception:
+        pass  # 非数字就沿用 flash.py 的默认值
+
+
+def apply_model(cfg, flash, model=None):
+    """按机型把默认值填进 flash 模块，再用 config.ini 里的用户值覆盖。
+
+    为什么需要这一步：`config.ini` 里存的账号密码是**上次选中的机型**的。
+    切换机型时如果直接沿用，就会拿贝尔的 `user`/`j3ba73@8` 去登烽火，
+    白耗认证机会甚至触发锁定。所以切换机型时应该先用机型默认值打底。
+
+    model 为 None 时读 cfg 里的 [device] model。
+    """
+    import models as models_mod
+    m = model or models_mod.get(cfg.get("device", "model", fallback=""))
+    flash.MODEL = m
+    # 机型层面的固定值（地址/端口/账号）先写进去，用户配置随后覆盖
+    if not cfg.get("device", "router_ip", fallback="").strip():
+        flash.ROUTER_IP = m.router_ip
+    flash.WEB_PORT = m.web_port
+    flash.MODEL_TELNET_USER = m.telnet_user
+    flash.MODEL_SU_USER = m.su_user
+    flash.NEED_FTP_FOR_SU = m.need_ftp_for_su
+    flash.SUPPORTS_WEB_TELNET = m.supports_web_telnet
+    flash.SUPPORTS_STOCK2UBI = m.supports_stock2ubi
+    flash.SUPPORTS_UBOOT_FLASH = m.supports_uboot_flash
+    flash.TELNET_ENABLE_MODE = m.telnet_enable
+    flash.MODEL_MAC = cfg.get("device", "mac", fallback="").strip()
+    return m
+
+
+def model_defaults(model):
+    """某机型的默认账号密码，供 GUI「切换机型」时填充表单。"""
+    return {
+        "device": {"router_ip": model.router_ip},
+        "telnet": {
+            "username": model.telnet_user,
+            "password": model.telnet_password,
+            "su_user": model.su_user,
+            "root_password": model.su_password,
+        },
+        "super": {
+            "username": model.super_user,
+            "password": model.super_password,
+        },
+    }

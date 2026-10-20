@@ -8,6 +8,7 @@
     python3 flash.py --mode backup        # 开启 Telnet+FTP + 备份全部分区（不写入）
     python3 flash.py --mode flash         # 开启 Telnet+FTP + 备份 + 刷写 U-Boot（危险）
     python3 flash.py --mode flash -y      # 跳过刷写前的 YES 二次确认
+    python3 flash.py --mode stock2ubi     # 上传并后台运行 an758x-stock2ubi（网页里刷）
     python3 flash.py --no-enable-telnet   # 假定 Telnet 已手动开启，不走网页步骤
     python3 flash.py --no-enable-ftp      # 假定 FTP 已手动开启，不走网页步骤
     python3 flash.py --force-backup       # 即使已有同一台设备的完整备份也重新备份
@@ -22,6 +23,12 @@ telnet 与 ftp 是两个独立开关，各自单独检测：
 关于自动开启 FTP：提权账号 user_ftp 只在 FTP 服务启用后存在，没开 FTP 时
 `su user_ftp` 会报 unknown user，拿不到 root，也就无法读 /dev/mtd*。所以
 backup/flash 模式会先自动开启 FTP（用完不主动关闭，建议刷完机后手动关掉）。
+
+关于 stock2ubi 模式：把 an758x-stock2ubi 上传到设备 /tmp、chmod +x、以后台
+方式跑起来（它是 aarch64 静态 ELF，自带 HTTP 服务，默认监听 0.0.0.0:3333），
+然后等 3333 端口起来并打印访问地址。后续的「备份分区 / 上传 preloader.bin +
+bl31-u-boot.fip / 重启进恢复页」都在它自己的网页里完成，本工具不代劳 ——
+那是 pbs05/an758x-stock2ubi 的界面，由它自己实现最可靠。
 """
 import telnetlib3.telnetlib as telnetlib
 import socket
@@ -36,6 +43,7 @@ import subprocess
 import re
 import http.cookiejar
 import urllib.error
+
 from urllib import request as urllib_request, parse as urllib_parse
 
 # 版本号唯一来源是 version.py。flash.py 是被 gui.py 用 importlib 动态加载的，
@@ -56,6 +64,43 @@ except Exception:
 
 # ================== 配置区 ==================
 ROUTER_IP = "192.168.1.1"
+
+# --- 机型（见 models.py）---
+# 机型决定了网页端口、超级账号、su 目标、是否需要 FTP 才能提权、
+# 以及哪些功能可用。GUI 和命令行都通过 config.apply_model() 写这三个变量。
+# 直接跑 flash.py 时用默认机型（贝尔移动版），行为与以前完全一致。
+MODEL = None                     # 机型对象（None = 用 BEL 默认值）
+WEB_PORT = 80                    # 管理网页端口（烽火是 8080）
+NEED_FTP_FOR_SU = True           # 提权前是否必须先开 FTP（贝尔 True，烽火 False）
+SUPPORTS_WEB_TELNET = True       # 是否有「网页一键开 telnet」接口
+SUPPORTS_STOCK2UBI = True        # 是否能用 an758x-stock2ubi
+SUPPORTS_UBOOT_FLASH = True      # 是否能刷 tcboot.bin 到 mtd0
+MODEL_TELNET_USER = ""           # 机型固定的 telnet 账号（空=用 USERNAME）
+MODEL_SU_USER = ""               # 机型固定的 su 账号（空=用 SU_USER）
+MODEL_MAC = ""                   # 光猫 MAC（烽火用它推导密码 / 开 telnet）
+TELNET_ENABLE_MODE = "web"       # 开 telnet 的方式：web / fhtool / manual
+BACKUP_TRANSPORT = "auto"        # 备份传输：curl / tftp / auto（先试 curl）
+
+# --- telnet 登录失败后的自动重启 ---
+# 光猫对连续认证失败有阈值（贝尔实测 3 次锁 300 秒），一旦触发就只能等或重启。
+# 与其让用户干等，不如自动重启一次再重试 —— 重启 1~3 分钟，但比干等 5 分钟更
+# 可控，而且能顺带清掉「网页会话被占用」这类残留状态。
+# 只在**确实失败**时重启，且最多重启 AUTO_REBOOT_MAX 次，避免死循环。
+AUTO_REBOOT_ON_LOGIN_FAIL = True   # False 则失败后直接退出，不自动重启
+AUTO_REBOOT_MAX = 1                # 整个登录过程最多自动重启几次
+AUTO_REBOOT_ASK = False            # True 则每次重启前询问（命令行交互用）
+
+# --- TTL / 串口控制台（拆机接线，不依赖网络）---
+# 与 telnet 路线的关系：两条路**二选一**。走 TTL 时完全不需要开 Telnet/FTP、
+# 不需要超级密码、不需要设备联网 —— 串口线接上就是 root shell。
+# 端口**不做任何自动探测**：由用户自己选（命令行 --serial-port，界面下拉框）。
+# 插了多个串口设备时自动猜会选错，而选错端口的代价是往别人的设备里敲字符。
+USE_SERIAL = False                 # True 则走串口而不是 telnet
+SERIAL_PORT = ""                   # 例如 /dev/ttyUSB0 或 COM3；空=必须由用户指定
+SERIAL_BAUD = 115200               # 这类光猫常见 115200，其次 57600
+SERIAL_USER = "root"               # 串口控制台登录账号（多数机型免密直接 root）
+SERIAL_PASSWORD = ""               # 串口 root 密码；留空则直接回车（免密机型）
+
 # 不同型号/固件的 telnet 账号不一样（有的 useradmin，有的 user）。
 # 留空 AUTO_DETECT_USERNAME=True 时，工具会从登录页 JS 里读出该机型实际的
 # telnet 账号（页面会 $("input[name='name']").val("xxx") 预填），
@@ -121,6 +166,19 @@ EXPECTED_SHA512 = "5d46e47c40967fcb0955c42e09ce2e610cf57059c33a62eb959ee1f534f86
 # 512KB 的 U-Boot 实测几秒到几十秒内生效，这里给足余量。
 FLASH_VERIFY_TIMEOUT = 120       # 回读校验最长轮询秒数
 FLASH_VERIFY_INTERVAL = 5        # 每次回读之间的间隔秒数
+
+# --- an758x-stock2ubi（--mode stock2ubi）---
+# 它把设备变成一台临时 HTTP 服务器（默认 0.0.0.0:3333），网页里备份分区、
+# 上传 preloader.bin/firstblock.bin + bl31-u-boot.fip，然后重启进 U-Boot 恢复页。
+# 本工具只负责「上传 + 后台运行 + 等端口起来」，刷写动作在它的网页里做。
+STOCK2UBI_FILE = "an758x-stock2ubi"   # 放在本工具同目录；也支持放到 dist/ 一起发
+STOCK2UBI_REMOTE = "/tmp/an758x-stock2ubi"
+STOCK2UBI_PORT = 3333
+STOCK2UBI_WAIT = 30                   # 等 3333 端口起来的秒数
+STOCK2UBI_IGNORE_KERNEL = False       # True 则加 --ignore-kernel-version 跳过内核版本检查
+STOCK2UBI_PROJECT_URL = "https://github.com/pbs05/an758x-stock2ubi"
+STOCK2UBI_UBOOT_URL = "https://github.com/pbs05/uboot-an758x"
+
 BACKUP_DIR = f"backup_{time.strftime('%Y%m%d_%H%M%S')}"
 TIMEOUT = 15
 BACKUP_FIRMWARE = True
@@ -313,6 +371,12 @@ def is_port_open(host, port, timeout=3):
     except OSError:
         return False
 
+def web_base():
+    """管理网页的根地址（端口随机型变，烽火是 8080）。"""
+    port = int(WEB_PORT or 80)
+    return f"http://{ROUTER_IP}" if port == 80 else f"http://{ROUTER_IP}:{port}"
+
+
 def _web_get(op, url, timeout=10):
     with op.open(url, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", errors="ignore")
@@ -332,7 +396,7 @@ def _web_post(op, url, body=b"data", timeout=10, headers=None):
 
 def _web_login():
     """尝试超级账号网页登录，返回 (status, body, opener)；status==299 为成功"""
-    base = f"http://{ROUTER_IP}"
+    base = web_base()
     cj = http.cookiejar.CookieJar()
     op = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(cj))
     _web_get(op, base + "/")  # 先 GET 首页拿到初始 cookie
@@ -349,7 +413,7 @@ def _web_login():
 
 def _telnet_state(op):
     """读取网页上的 Telnet 开关状态（页面 JS: telnet_config.TelnetEnable）"""
-    _, page = _web_get(op, f"http://{ROUTER_IP}/system.cgi?telnet")
+    _, page = _web_get(op, web_base() + "/system.cgi?telnet")
     m = re.search(r"(?<!Factory)TelnetEnable\s*:\s*(\d+)", page)
     return m.group(1) if m else None
 
@@ -384,7 +448,7 @@ def reboot_router(op=None):
     重启会清掉服务端所有网页会话，也是解开 telnet 认证锁定（300s）的办法。
     重启耗时通常 1~3 分钟，期间设备不可达。
     """
-    base = f"http://{ROUTER_IP}"
+    base = web_base()
     own = op is None
     if own:
         try:
@@ -419,12 +483,22 @@ def reboot_router(op=None):
         except Exception:
             pass
 
+    return _wait_after_reboot()
+
+
+def _wait_after_reboot():
+    """等设备重启完成（先等端口断开，再等它回来）。返回是否成功恢复。
+
+    为什么必须先等断开：有些机型收到重启请求后不会立刻断网（要过几秒才真正
+    开始重启），如果直接等「端口可连」就会在设备还没重启时就立刻判定成功，
+    后面的操作全部落空。先确认它掉线，才能证明重启真的执行了。
+    """
+    port = int(WEB_PORT or 80)
     print("[*] 等待光猫重启（通常 1~3 分钟）...")
-    # 先等端口断开，再等它回来；否则会在设备还没真正重启时就误判「已恢复」
     time.sleep(5)
     gone = False
     for _ in range(30):
-        if not is_port_open(ROUTER_IP, 80, timeout=2):
+        if not is_port_open(ROUTER_IP, port, timeout=2):
             gone = True
             break
         time.sleep(2)
@@ -435,17 +509,50 @@ def reboot_router(op=None):
 
     for i in range(90):
         time.sleep(5)
-        if is_port_open(ROUTER_IP, 80, timeout=2):
+        if is_port_open(ROUTER_IP, port, timeout=2):
             time.sleep(8)  # 让 web 服务彻底就绪
             print(f"[✓] 光猫已恢复响应（约 {(i + 1) * 5 + 13} 秒）")
             return True
     print("[!] 等待超时，请确认光猫已上电联网。")
     return False
 
+
+def model_reboot():
+    """按机型重启光猫（用于清掉 telnet 认证锁定）。
+
+    两条路径：
+      - 烽火（TELNET_ENABLE_MODE == "fhtool"）：走 8080 上的 fh_tool 加密 RPC
+        DeviceReboot。**不需要登录、不需要超级密码**，所以即使 telnet 被锁、
+        网页会话被占，这条路依然可用 —— 这正是它作为解锁手段的价值。
+      - 贝尔：走管理页 POST /system.cgi?reboot（要先登录超级账号）。
+    返回是否成功恢复。
+    """
+    if TELNET_ENABLE_MODE == "fhtool":
+        mac = (MODEL_MAC or "").strip()
+        try:
+            import fhtool
+        except Exception as e:  # noqa: BLE001
+            print(f"[!] 无法加载 fhtool 后端（{e!r}），改走网页接口重启。")
+            return reboot_router()
+        if not fhtool.normalize_mac(mac):
+            print("[!] 未填写光猫 MAC，无法用 fh_tool 重启，改走网页接口。")
+            return reboot_router()
+        print(f"[*] 通过 fh_tool RPC 重启光猫（MAC {fhtool.normalize_mac(mac)}）...")
+        try:
+            client = fhtool.FhClient(ROUTER_IP, mac, port=WEB_PORT, timeout=8.0)
+            client.reboot()
+        except Exception as e:  # noqa: BLE001
+            print(f"[!] fh_tool 重启失败：{type(e).__name__}: {e}")
+            print("    改走网页接口重启 ...")
+            return reboot_router()
+        print("[✓] 设备已接受重启指令")
+        return _wait_after_reboot()
+    return reboot_router()
+
 def _web_logout(op, quiet=False):
     """主动退出网页登录，释放那个唯一的超级账号会话。"""
     try:
-        _web_get(op, f"http://{ROUTER_IP}/login.cgi?out")
+        _web_get(op, web_base() + "/login.cgi?out")
         if not quiet:
             print("[*] 已退出网页登录（释放会话）")
     except Exception:
@@ -502,6 +609,45 @@ def _web_login_with_retry(retry_seconds=None, purpose="操作"):
         break
     return None, False
 
+def enable_telnet_via_fhtool(mac, retry_seconds=None):
+    """烽火机型：用 8080 上的 fh_tool 加密 RPC 直接开启 Telnet。
+
+    为什么走这条路：烽火的网页里没有「一键开 telnet」的按钮，但设备在
+    8080 上开了一个**无需登录**的 fh_tool RPC，请求体用 MAC 派生的 AES
+    加密 —— 知道 MAC 就等于有权限。发一个 TelnetEnable{"telnet":"1"} 即可。
+
+    这条路径不碰网页会话，所以不受「单会话限制」影响，也不需要超级密码。
+    """
+    if is_port_open(ROUTER_IP, TELNET_PORT):
+        print(f"[✓] 检测到 Telnet 已开启（{ROUTER_IP}:{TELNET_PORT}），跳过开启步骤。")
+        return
+    try:
+        import fhtool
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] 无法加载 fhtool 后端（{e!r}），请手动开启 Telnet。")
+        sys.exit(1)
+    if not fhtool.normalize_mac(mac):
+        print("[!] 烽火机型需要「光猫 MAC」才能开启 Telnet（请在界面填写或配置 [device] mac）。")
+        sys.exit(1)
+
+    print(f"[*] 通过 fh_tool RPC 开启 Telnet（MAC {fhtool.normalize_mac(mac)}）...")
+    client = fhtool.FhClient(ROUTER_IP, mac, port=WEB_PORT, timeout=8.0)
+    try:
+        client.telnet_enabled(True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] fh_tool 开启 Telnet 失败：{type(e).__name__}: {e}")
+        print("    请确认设备 8080 端口可访问、MAC 填的是光猫背面的那个。")
+        sys.exit(1)
+    # 等 telnetd 起来
+    for _ in range(15):
+        if is_port_open(ROUTER_IP, TELNET_PORT, timeout=2):
+            print(f"[✓] Telnet 已开启（{ROUTER_IP}:{TELNET_PORT}）")
+            return
+        time.sleep(1)
+    print("[!] fh_tool 返回成功，但 telnet 端口仍未监听。请稍等再试，或重启光猫。")
+    sys.exit(1)
+
+
 def enable_telnet_via_web(retry_seconds=None):
     """通过超级账号网页接口自动开启 Telnet（免拆机）。
 
@@ -517,7 +663,7 @@ def enable_telnet_via_web(retry_seconds=None):
         print(f"[✓] 检测到 Telnet 已开启（{ROUTER_IP}:{TELNET_PORT}），跳过网页开启步骤。")
         return
 
-    base = f"http://{ROUTER_IP}"
+    base = web_base()
     print(f"[*] 通过超级账号登录网页（{SUPER_USER}）自动开启 Telnet ...")
     op, ok = _web_login_with_retry(retry_seconds, purpose="开启 Telnet")
     if ok:
@@ -574,7 +720,7 @@ def enable_ftp_via_web(retry_seconds=None):
         print(f"[✓] 检测到 FTP 已开启（{ROUTER_IP}:{FTP_PORT}），跳过网页开启步骤。")
         return
 
-    base = f"http://{ROUTER_IP}"
+    base = web_base()
     print(f"[*] 通过超级账号登录网页（{SUPER_USER}）自动开启 FTP ...")
     op, ok = _web_login_with_retry(retry_seconds, purpose="开启 FTP")
     if not ok:
@@ -626,12 +772,17 @@ def enable_ftp_via_web(retry_seconds=None):
     print("[✓] FTP 已开启（su user_ftp 提权路径已就绪）")
 
 def parse_args(argv):
-    """命令行参数：--mode telnet|ftp|backup|flash、--no-enable-telnet、
-    --no-enable-ftp、--force-backup、--reboot、--yes"""
+    """命令行参数：--mode telnet|ftp|backup|flash|stock2ubi、--no-enable-telnet、
+    --no-enable-ftp、--force-backup、--reboot、--yes、--stock2ubi-file"""
     global MODE
     args = {"mode": MODE, "enable_telnet": AUTO_ENABLE_TELNET, "yes": False,
             "reboot": False, "enable_ftp": AUTO_ENABLE_FTP,
-            "force_backup": not SKIP_BACKUP_IF_COMPLETE}
+            "force_backup": not SKIP_BACKUP_IF_COMPLETE,
+            "stock2ubi_file": STOCK2UBI_FILE,
+            "stock2ubi_ignore_kernel": STOCK2UBI_IGNORE_KERNEL,
+            "model": None,
+            "serial_port": "", "serial_baud": None,
+            "serial_user": "", "serial_password": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -647,18 +798,51 @@ def parse_args(argv):
             args["force_backup"] = True; i += 1
         elif a == "--reboot":
             args["reboot"] = True; i += 1
+        elif a == "--model" and i + 1 < len(argv):
+            args["model"] = argv[i + 1]; i += 2
+        elif a.startswith("--model="):
+            args["model"] = a.split("=", 1)[1]; i += 1
+        elif a == "--stock2ubi-file" and i + 1 < len(argv):
+            args["stock2ubi_file"] = argv[i + 1]; i += 2
+        elif a.startswith("--stock2ubi-file="):
+            args["stock2ubi_file"] = a.split("=", 1)[1]; i += 1
+        elif a == "--stock2ubi-ignore-kernel":
+            args["stock2ubi_ignore_kernel"] = True; i += 1
+        elif a == "--serial-port" and i + 1 < len(argv):
+            args["serial_port"] = argv[i + 1]; i += 2
+        elif a.startswith("--serial-port="):
+            args["serial_port"] = a.split("=", 1)[1]; i += 1
+        elif a == "--serial-baud" and i + 1 < len(argv):
+            args["serial_baud"] = argv[i + 1]; i += 2
+        elif a.startswith("--serial-baud="):
+            args["serial_baud"] = a.split("=", 1)[1]; i += 1
+        elif a == "--serial-user" and i + 1 < len(argv):
+            args["serial_user"] = argv[i + 1]; i += 2
+        elif a.startswith("--serial-user="):
+            args["serial_user"] = a.split("=", 1)[1]; i += 1
+        elif a == "--serial-password" and i + 1 < len(argv):
+            args["serial_password"] = argv[i + 1]; i += 2
+        elif a.startswith("--serial-password="):
+            args["serial_password"] = a.split("=", 1)[1]; i += 1
         elif a in ("-y", "--yes"):
             args["yes"] = True; i += 1
         elif a in ("-h", "--help"):
             print(__doc__ or "")
-            print("用法: python3 flash.py [--mode telnet|ftp|backup|flash] "
-                  "[--no-enable-telnet] [--no-enable-ftp] [--force-backup] [--reboot] [-y]")
+            print("用法: python3 flash.py "
+                  "[--mode telnet|ftp|backup|flash|stock2ubi] "
+                  "[--no-enable-telnet] [--no-enable-ftp] [--force-backup] "
+                  "[--reboot] [--model bel|hg5585f] "
+                  "[--stock2ubi-file 路径] "
+                  "[--stock2ubi-ignore-kernel] "
+                  "[--serial-port /dev/ttyUSB0|COM3] [--serial-baud 115200] "
+                  "[--serial-user root] [--serial-password xxx] [-y]")
             sys.exit(0)
         else:
             print(f"[!] 未知参数: {a}（用 --help 查看用法）")
             sys.exit(1)
-    if args["mode"] not in ("telnet", "ftp", "backup", "flash"):
-        print(f"[!] 非法模式: {args['mode']}（可选 telnet / ftp / backup / flash）")
+    if args["mode"] not in ("telnet", "ftp", "backup", "flash", "stock2ubi"):
+        print(f"[!] 非法模式: {args['mode']}"
+              "（可选 telnet / ftp / backup / flash / stock2ubi）")
         sys.exit(1)
     return args
 
@@ -759,7 +943,10 @@ def confirm_identity(tn, timeout=10, tries=3):
     return None
 
 def telnet_connect(retries=6, backoff=30):
-    """连接 telnetd 并等到出现 Login: 提示。
+    """连接 telnetd 并等到出现 Login: 提示；失败返回 None（不直接退出）。
+
+    为什么返回 None 而不是 sys.exit：调用方需要在「连不上」时决定是否重启
+    光猫再试（见 telnet_login 的自动重启逻辑）。在这里退出就没机会重启了。
 
     这台光猫对 telnet 有「静默限流」：短时间内连续连接时，TCP 握手会成功，
     但 telnetd 立刻关闭连接且不发任何 banner（telnetlib 表现为
@@ -789,9 +976,8 @@ def telnet_connect(retries=6, backoff=30):
         print(f"[!] {last}，{backoff} 秒后重试 {i + 1}/{retries} ...")
         time.sleep(backoff)
     print(f"[!] 无法与 telnetd 交互：{last}")
-    print("[!] 该光猫对 telnet 有静默限流，连续快速重试只会延长封锁时间，"
-          "请安静等待几分钟，或用 python3 flash.py --reboot 重启后再试。")
-    sys.exit(1)
+    print("[!] 该光猫对 telnet 有静默限流，连续快速重试只会延长封锁时间。")
+    return None
 
 def detect_telnet_username():
     """从网页登录页读出该机型实际的 telnet 账号。
@@ -801,7 +987,7 @@ def detect_telnet_username():
     不同型号/固件不一样（有的 useradmin，有的 user）。
     """
     try:
-        with urllib_request.urlopen(f"http://{ROUTER_IP}/", timeout=8) as r:
+        with urllib_request.urlopen(web_base() + "/", timeout=8) as r:
             page = r.read().decode("utf-8", errors="ignore")
     except Exception as e:
         print(f"[!] 读取登录页失败，无法自动探测账号: {e!r}")
@@ -812,44 +998,35 @@ def detect_telnet_username():
     m = re.search(r"""val\(\s*["']([A-Za-z0-9_\-]+)["']\s*\)""", page)
     return m.group(1) if m else None
 
-def telnet_login(reenter_only=False):
-    """Telnet 登录并 su 到 root，返回 Telnet 连接对象
+def _telnet_login_once(candidates, retries=6, backoff=30):
+    """尝试用候选账号登录 telnet，返回 (tn, who, reason)。
 
-    注意：
-      - TELNET 密码通常在光猫底部铭牌上，和网页超级密码不是一回事；
-      - 账号各型号不同，本函数先从网页登录页自动探测，再按候选列表尝试；
-      - 连续 3 次认证失败光猫会锁定 telnet 约 300 秒，所以每个账号只试一次，
-        失败立即退出，不要盲目重试（重启可立刻解锁：python3 flash.py --reboot）。
-      - reenter_only=True 时跳过候选账号探测，直接用当前候选列表第一个登录，
-        用于 su 失败导致连接断开后的重新登录。
+    reason 说明失败原因，决定上层要不要重启光猫：
+      - "ok"      成功（tn 有效）
+      - "conn"    连不上 telnetd（静默限流 / 服务没起来）→ 重启有意义
+      - "auth"    连上了但账号密码被拒 → 已消耗认证机会，接近阈值时要重启
+      - "lockout" 明确提示 forbidden（已被锁）→ 必须重启或等
     """
-    # 1) 决定候选账号
-    candidates = []
-    if AUTO_DETECT_USERNAME and not reenter_only:
-        det = detect_telnet_username()
-        if det:
-            print(f"[*] 从网页登录页自动探测到 telnet 账号: {det}")
-            candidates.append(det)
-    for u in ([USERNAME] + list(USERNAME_CANDIDATES)):
-        if u and u not in candidates:
-            candidates.append(u)
-    if not candidates:
-        print("[!] 没有可用的 telnet 账号候选，请配置 USERNAME。")
-        sys.exit(1)
-    if reenter_only:
-        candidates = candidates[:1]
-
-    # 2) 逐个尝试登录（每个账号最多一次，避免触发锁定）
     tn = None
     who = None
+    last_reason = "conn"
     for idx, user in enumerate(candidates):
         if tn is None:
             print(f"[*] 连接光猫 {ROUTER_IP}...")
-            tn = telnet_connect()
+            tn = telnet_connect(retries=retries, backoff=backoff)
+            if tn is None:
+                return None, None, "conn"
         print(f"[*] 尝试 telnet 账号: {user}"
-              + ("（最后一个候选，再失败会触发 300 秒锁定）" if idx == len(candidates) - 1 else ""))
+              + ("（最后一个候选，再失败会触发锁定）" if idx == len(candidates) - 1 else ""))
         tn.write(user.encode() + b"\n")
         hit, text = expect_any(tn, ["Password:", "Error!", "closed"], timeout=10)
+        if "forbidden" in (text or ""):
+            print("[!] 设备提示认证被禁止（已触发连续失败锁定）。")
+            try:
+                tn.close()
+            except Exception:
+                pass
+            return None, None, "lockout"
         if not hit or hit in ("Error!", "closed"):
             print(f"[!] 账号 {user} 未被接受（{(text or '').strip()[:100]}）")
             try:
@@ -857,6 +1034,7 @@ def telnet_login(reenter_only=False):
             except Exception:
                 pass
             tn = None
+            last_reason = "auth"
             time.sleep(3)
             continue
         tn.write(PASSWORD.encode() + b"\n")
@@ -871,21 +1049,107 @@ def telnet_login(reenter_only=False):
             except Exception:
                 pass
             tn = None
+            last_reason = "auth"
             time.sleep(3)
             continue
-        if "forbidden" in (text or ""):
-            print("[!] 已触发连续认证失败锁定，telnet 约 300 秒内会被拒绝，请勿立即重试。")
-            print("[!] 重启光猫可立刻解除锁定：python3 flash.py --reboot")
-            sys.exit(1)
         print(f"[✓] 登录成功（账号 {user}，身份 {who}）")
-        break
+        return tn, who, "ok"
 
-    if tn is None:
-        print("[!] 所有候选账号都无法登录 telnet。")
-        print(f"[!] telnet 密码通常是光猫底部铭牌上的那一个（当前配置 PASSWORD='{PASSWORD}'），"
-              f"与网页超级密码不是同一个。")
-        print("[!] 如需指定账号，请修改配置区 USERNAME / USERNAME_CANDIDATES。")
+    if tn is not None:
+        try:
+            tn.close()
+        except Exception:
+            pass
+    return None, None, last_reason
+
+
+def _should_reboot(reason, rebooted, ask=True):
+    """判断这次失败要不要自动重启光猫。
+
+    三种失败都重启一次（用户明确要求：失败次数多了触发阈值就直接重启）：
+      - lockout：设备回了 forbidden，只能等或重启；
+      - conn：连 Login 提示都拿不到（静默限流），同样只能等或重启；
+      - auth：所有候选账号都试完仍被拒 —— 这时认证失败次数已经逼近阈值
+        （贝尔实测 3 次就锁 300 秒），重启能立刻清零计数。
+
+    auth 也会重启，但只重启 AUTO_REBOOT_MAX 次（默认 1 次）：如果重启后仍然
+    登不上，那就是账号密码真的不对，继续重启只会反复断网，没有意义。
+    """
+    if not AUTO_REBOOT_ON_LOGIN_FAIL:
+        return False
+    if rebooted >= AUTO_REBOOT_MAX:
+        if reason == "auth":
+            print("[!] 重启后仍然登录失败，说明账号/密码不对，重启解决不了。")
+            print("[!] 请检查「铭牌用户账号/密码」或界面上的机型是否选对。")
+        else:
+            print(f"[!] 已自动重启 {rebooted} 次，不再重启（避免死循环）。")
+        return False
+    if ask and AUTO_REBOOT_ASK:
+        try:
+            return input("现在重启光猫解除锁定吗？输入 YES 执行：").strip().upper() == "YES"
+        except EOFError:
+            return False
+    return True
+
+
+def telnet_login(reenter_only=False, _su_retried=False):
+    """Telnet 登录并 su 到 root，返回 Telnet 连接对象
+
+    注意：
+      - TELNET 密码通常在光猫底部铭牌上，和网页超级密码不是一回事；
+      - 账号各型号不同，本函数先从网页登录页自动探测，再按候选列表尝试；
+      - 连续几次认证失败光猫会锁定 telnet（贝尔实测 3 次锁 300 秒）。所以每个
+        账号只试一次；一旦失败，按 AUTO_REBOOT_ON_LOGIN_FAIL 自动重启光猫
+        （最多 AUTO_REBOOT_MAX 次）再试 —— 重启比干等 5 分钟更可控。
+      - reenter_only=True 时跳过候选账号探测，直接用当前候选列表第一个登录，
+        用于 su 失败导致连接断开后的重新登录。
+      - _su_retried 是内部标志，防止「su 失败 → 重启 → su 又失败」无限递归。
+    """
+    # 1) 决定候选账号
+    candidates = []
+    # 机型固定了 telnet 账号时（烽火 telnetadmin）就直接用，不探测不试错：
+    # 那个账号是机型属性，探测出来的通常是网页账号，试错还会白耗认证机会。
+    if MODEL_TELNET_USER:
+        candidates.append(MODEL_TELNET_USER)
+    if AUTO_DETECT_USERNAME and not reenter_only and not MODEL_TELNET_USER:
+        det = detect_telnet_username()
+        if det:
+            print(f"[*] 从网页登录页自动探测到 telnet 账号: {det}")
+            candidates.append(det)
+    for u in ([USERNAME] + ([] if MODEL_TELNET_USER else list(USERNAME_CANDIDATES))):
+        if u and u not in candidates:
+            candidates.append(u)
+    if not candidates:
+        print("[!] 没有可用的 telnet 账号候选，请配置 USERNAME。")
         sys.exit(1)
+    if reenter_only:
+        candidates = candidates[:1]
+
+    # 2) 逐个尝试登录；失败则按策略自动重启光猫后重试
+    rebooted = 0
+    while True:
+        tn, who, reason = _telnet_login_once(candidates)
+        if tn is not None:
+            break
+        if not _should_reboot(reason, rebooted):
+            if reason == "conn":
+                print("[!] 无法与 telnetd 建立可交互会话。")
+                print("[!] 该光猫对 telnet 有静默限流，连续快速重试只会延长封锁时间。")
+                print("[!] 可以稍等几分钟再试，或手动重启光猫：python3 flash.py --reboot")
+            else:
+                print("[!] telnet 登录失败。")
+                print(f"[!] telnet 密码通常是光猫底部铭牌上的那一个"
+                      f"（当前配置 PASSWORD='{PASSWORD}'），与网页超级密码不是同一个。")
+                print("[!] 如需指定账号，请修改配置区 USERNAME / USERNAME_CANDIDATES。")
+            sys.exit(1)
+        rebooted += 1
+        print()
+        print(f"[*] telnet 登录失败（原因: {reason}），自动重启光猫以解除锁定 ...")
+        print("[*] 重启通常 1~3 分钟；这一步会清掉认证计数和残留会话。")
+        if not model_reboot():
+            print("[!] 自动重启失败，请手动重启光猫后重试。")
+            sys.exit(1)
+        print("[✓] 光猫已重启，重新尝试 telnet 登录 ...")
 
     # 3) su 提权
     if who == "root":
@@ -896,14 +1160,17 @@ def telnet_login(reenter_only=False):
     # 这是设备上的既定事实（user_ftp 只在启用 FTP 后由 IGD FTP Server 注入，
     # 它的密码就是 telnet 密码），所以不做任何候选尝试：错就是错，直接报错。
     # 试错只会白白消耗认证机会（连续 3 次失败锁 300 秒），没有任何收益。
-    print(f"[*] 切换到 {SU_USER} ...")
-    tn.write(f"su {SU_USER}\n".encode())
+    su_target = MODEL_SU_USER or SU_USER
+    print(f"[*] 切换到 {su_target} ...")
+    tn.write(f"su {su_target}\n".encode())
     hit, text = expect_any(tn, ["Password:", "Error!", "not found", "unknown user", "closed"], timeout=10)
     if hit != "Password:":
-        print(f"[!] 切换 {SU_USER} 异常：{(text or '').strip()[:150]}")
+        print(f"[!] 切换 {su_target} 异常：{(text or '').strip()[:150]}")
         if "not found" in (text or "") or "unknown" in (text or "").lower():
-            print(f"[!] 很可能 su: unknown user {SU_USER} —— 该账号只在**启用 FTP 服务**后存在。")
-            print("[!] 请先在光猫网页上启用 FTP，再重试。")
+            print(f"[!] 很可能 su: unknown user {su_target}")
+            if NEED_FTP_FOR_SU:
+                print("[!] 该账号只在**启用 FTP 服务**后存在，"
+                      "请先在光猫网页上启用 FTP，再重试。")
         sys.exit(1)
 
     # su user_ftp 的密码就是 telnet 登录密码，不做候选尝试。
@@ -915,16 +1182,69 @@ def telnet_login(reenter_only=False):
     if who == "root":
         print("[✓] 已获取 root 权限")
         return tn
-    print(f"[!] su {SU_USER} 失败：用 telnet 密码登录后身份仍是 {who or '未知'}。")
-    print(f"[!] {SU_USER} 的密码应与 telnet 密码（当前配置 '{ROOT_PASSWORD}'）相同，"
-          f"若设备上改过 telnet 密码，请同步修改配置区 PASSWORD。")
-    print(f"[!] 另外 su {SU_USER} 只在**启用 FTP 服务**后存在；"
-          f"没开 FTP 会报 su: unknown user {SU_USER}。")
+    print(f"[!] su {su_target} 失败：用当前密码登录后身份仍是 {who or '未知'}。")
+    print(f"[!] {su_target} 的密码（当前配置 '{ROOT_PASSWORD}'）不对，"
+          f"请检查配置或机型选择。")
+    if NEED_FTP_FOR_SU:
+        print(f"[!] 另外 su {su_target} 只在**启用 FTP 服务**后存在；"
+              f"没开 FTP 会报 su: unknown user {su_target}。")
     tn.close()
+    # su 失败同样可能是认证计数被占满导致的，给一次自动重启的机会。
+    # _su_retried 防止「su 失败 → 重启 → su 又失败」无限递归。
+    if AUTO_REBOOT_ON_LOGIN_FAIL and not _su_retried:
+        print("[*] 自动重启光猫后重试一次 su ...")
+        if model_reboot():
+            return telnet_login(reenter_only=True, _su_retried=True)
     sys.exit(1)
 
+def serial_login_flow(args):
+    """打开 TTL 串口并拿到 root shell，返回 SerialShell（接口同 Telnet）。
+
+    与 telnet_login 的区别：串口不存在「账号被锁」「网页会话被占用」这些
+    问题，也不会有认证计数，所以没有自动重启重试那套逻辑 —— 接错了就是
+    接错了（端口/波特率/TX-RX），重试没有意义，直接把原因说清楚。
+    """
+    import serial_shell
+
+    port = (args.get("serial_port") or SERIAL_PORT or "").strip()
+    baud = int(args.get("serial_baud") or SERIAL_BAUD or 115200)
+    if not port:
+        print("[!] 没有指定串口端口。")
+        print("[!] 用 --serial-port 指定（例如 --serial-port /dev/ttyUSB0 "
+              "或 --serial-port COM3），")
+        print("[!] 或者先跑 `python3 serial_shell.py` 看当前有哪些串口。")
+        sys.exit(1)
+
+    ports = [p for p, _ in serial_shell.list_ports()]
+    print(f"[*] 本机可用串口: {', '.join(ports) if ports else '（一个都没有）'}")
+    print(f"[*] 使用串口: {port} @ {baud} 8N1")
+
+    try:
+        shell = serial_shell.SerialShell(port, baudrate=baud).open()
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] {e}")
+        if ports:
+            print(f"[!] 当前可用的串口是: {', '.join(ports)}")
+        sys.exit(1)
+
+    print("[*] 等待串口控制台响应（回车探测）...")
+    ok, msg = serial_shell.serial_login(
+        shell, username=args.get("serial_user") or SERIAL_USER,
+        password=args.get("serial_password", SERIAL_PASSWORD))
+    if not ok:
+        print(f"[!] {msg}")
+        shell.close()
+        sys.exit(1)
+    print(f"[✓] {msg}")
+
+    # 串口默认没有回显/没有提示符时，命令输出会粘在一起，先统一一次提示符。
+    shell.read_very_eager()
+    shell.write(b"\r\n")
+    shell.expect([b"[#\\$] ?$"], timeout=5)
+    return shell
+
+
 # ---------- 临时 HTTP 文件服务器（替代 nc）----------
-# 为什么不用 nc：nc 需要主机侧**精确卡时间**先起监听、设备才敢连，任一环节慢
 # 一拍就丢数据（实测表现为备份文件 0 字节）；而且每个分区都要重新起一次监听，
 # 每个分区就是一次竞态。HTTP 是请求-响应模型，没有竞态，curl 还自带重试与
 # 断点续传。设备上实测有 curl 7.77.0（/sbin/curl，支持 http/https/ftp/tftp），
@@ -1083,6 +1403,157 @@ class TempFileServer:
     def __exit__(self, *exc):
         self.stop()
 
+# ---------- 临时 TFTP 服务器（烽火备份用）----------
+# 烽火的 busybox 不一定带 curl，但一定带 tftp —— 教程里备份就是用
+# `dd if=/dev/mtdN | tftp -p -l - -r <name> <host>`。TFTP 协议极简
+# （RFC 1350：WRQ + DATA + ACK），标准库没有现成实现，但几十行就够：
+# 我们只接收（WRQ），不支持读（RRQ）、不协商选项、block 编号回绕即可。
+import struct as _struct
+
+LOCAL_TFTP_PORT = 69             # 标准 TFTP 端口（需 root；被占用时自动换高位端口）
+
+
+class _TftpReceiver:
+    """极简 TFTP 服务端：只接收 WRQ 上传，按文件名落盘。"""
+
+    def __init__(self, recv_dir, allow_ip=None, port=LOCAL_TFTP_PORT):
+        self.recv_dir = os.path.abspath(recv_dir)
+        self.allow_ip = allow_ip
+        self.requested_port = port
+        self.port = None
+        self._sock = None
+        self._stop = threading.Event()
+        self._thread = None
+        self.errors = []
+
+    # --- 生命周期 ---
+    def start(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", self.requested_port))
+        except OSError:
+            # 69 是特权端口；非 root 或已被占用时退到高位端口。
+            # 设备侧命令里的端口号由调用方拼，所以这里把实际端口记下来。
+            s.close()
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", 0))
+        self._sock = s
+        self.port = s.getsockname()[1]
+        s.settimeout(0.5)
+        self._thread = threading.Thread(target=self._serve, name="tftp", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+
+    # --- 收包 ---
+    def _serve(self):
+        while not self._stop.is_set():
+            try:
+                data, addr = self._sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                self._handle(data, addr)
+            except Exception as e:  # noqa: BLE001
+                self.errors.append(f"{addr}: {e!r}")
+
+    def _handle(self, data, addr):
+        if len(data) < 4:
+            return
+        opcode = _struct.unpack("!H", data[:2])[0]
+        if opcode != 2:              # 只处理 WRQ（写请求）
+            return
+        # WRQ: opcode(2) filename\0 mode\0
+        parts = data[2:].split(b"\x00")
+        if len(parts) < 2:
+            return
+        fname = _safe_basename(parts[0].decode("utf-8", "replace"))
+        if not fname:
+            return
+        if self.allow_ip and addr[0] != self.allow_ip:
+            return
+        path = os.path.join(self.recv_dir, fname)
+        # 每次传输用**独立的 socket + 独立线程**（这正是 TFTP 的 TID 机制：
+        # 服务器应从新端口回包）。关键原因是：若在收包主循环里直接做整笔
+        # 传输，那么任何一个客户端只发 WRQ 不发 DATA（或中途掉线），主循环
+        # 就会被它卡死，后面所有分区的上传全部超时 —— 实测踩过。
+        t = threading.Thread(target=self._recv_file, args=(addr, path),
+                             name=f"tftp-rx-{fname}", daemon=True)
+        t.start()
+
+    def _recv_file(self, addr, path):
+        """在独立线程里接收一个文件。超时/中断都不会影响主循环。"""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.bind(("0.0.0.0", 0))
+            sock.settimeout(5)
+            self._send_ack(sock, addr, 0)      # 确认 WRQ
+            last_block = 0
+            with open(path, "wb") as fh:
+                while not self._stop.is_set():
+                    try:
+                        pkt, paddr = sock.recvfrom(65536)
+                    except socket.timeout:
+                        # 5 秒没收到下一个包：把上一个 ACK 再发一次
+                        # （TFTP 靠重复 ACK 让客户端重传，而不是直接失败）
+                        if last_block:
+                            self._send_ack(sock, addr, last_block)
+                            continue
+                        self.errors.append(f"{path}: 等待 DATA 超时")
+                        return
+                    if paddr[0] != addr[0]:
+                        continue
+                    if len(pkt) < 4:
+                        continue
+                    op = _struct.unpack("!H", pkt[:2])[0]
+                    if op == 3:              # DATA
+                        block = _struct.unpack("!H", pkt[2:4])[0]
+                        if block == ((last_block + 1) & 0xFFFF) or block == last_block:
+                            fh.write(pkt[4:])
+                            fh.flush()
+                            last_block = block
+                        self._send_ack(sock, addr, block)
+                        if len(pkt) - 4 < 512:   # 最后一个包
+                            return
+                    elif op == 5:            # ERROR
+                        self.errors.append(f"{path}: 客户端报错")
+                        return
+        except OSError as e:
+            self.errors.append(f"{path}: {e!r}")
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _send_ack(sock, addr, block):
+        try:
+            sock.sendto(_struct.pack("!HH", 4, block), addr)
+        except OSError:
+            pass
+
+
+
 def run_cmd(tn, cmd: str, timeout: int = 30, prompt="#") -> str:
     """执行一条命令并把输出读到提示符为止。
 
@@ -1101,6 +1572,12 @@ def device_has_curl(tn) -> bool:
     """探测设备侧是否可用 curl（HTTP 方案的前提）。"""
     out = run_cmd(tn, "which curl; echo CURLEXIT=$?", timeout=20)
     return "CURLEXIT=0" in out
+
+def device_has_tftp(tn) -> bool:
+    """探测设备侧是否可用 busybox tftp（烽火备份用）。"""
+    out = run_cmd(tn, "which tftp; echo TFTPEXIT=$?", timeout=20)
+    return "TFTPEXIT=0" in out
+
 
 def collect_device_info(tn):
     """从设备读取机型 / 序列号 / 软硬件版本等信息（需 root）。
@@ -1263,53 +1740,112 @@ def find_verified_backup(current_info, root_dir="."):
             return d, why
     return None, "未找到同一序列号且校验完整的备份"
 
-def backup_all_partitions(tn, local_ip, backup_dir):
-    """用 dd + curl(HTTP) 备份所有 MTD 分区到 backup_dir。
+def _check_backup_file(i, name, filepath):
+    """备份完一个分区后的三项检查：非空、大小与分区表一致。"""
+    size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
+    if size == 0:
+        print(f"[!] mtd{i} ({name}) 备份为空，中止以免留下不完整备份")
+        sys.exit(1)
+    expected = MTD_SIZES.get(i)
+    if expected and size != expected:
+        print(f"[!] mtd{i} ({name}) 大小不符：收到 {size}，期望 {expected}")
+        sys.exit(1)
+    print(f"    → {filepath} ({size} 字节)")
 
-    相对旧版 nc 实现的改进：HTTP 是请求-响应模型，不存在"监听起晚了就丢数据"
-    的竞态；每个分区独立一次 PUT，失败可单独重试，不会污染其它分区。
+
+def _backup_one_curl(tn, i, name, local_ip, backup_dir):
+    """用一个分区：dd 直读 mtdN，通过 curl PUT 到主机的临时 HTTP 服务器。"""
+    fname = f"mtd{i}_{name}.bin"
+    filepath = os.path.join(backup_dir, fname)
+    print(f"  → 备份 mtd{i} ({name}) ...")
+    # 先删掉可能存在的旧文件，避免把上次的残留误判成本次成功
+    try:
+        os.remove(filepath)
+    except OSError:
+        pass
+
+    cmd = (f"dd if=/dev/mtd{i} bs=1M 2>/dev/null | "
+           f"curl -s -T - http://{local_ip}:{LOCAL_HTTP_PORT}/{fname}")
+    drain(tn)                       # 先排空，避免上一步的 '#' 让它立刻返回
+    tn.write(cmd.encode() + b"\n")
+    # 大分区（如 all_flash 236MB）需要更长时间，按大小给足超时
+    got = wait_for(tn, "#", timeout=max(60, _expected_size(i) // 1024 // 512))
+    if not got:
+        print(f"[!] 读取 mtd{i} ({name}) 失败（等待提示符超时）")
+        sys.exit(1)
+    _check_backup_file(i, name, filepath)
+
+
+def _backup_one_tftp(tn, i, name, local_ip, backup_dir, port):
+    """用一个分区：dd 直读 mtdN，通过 busybox tftp 推到主机的临时 TFTP 服务器。
+
+    busybox 的写法是 `tftp -p -l - -r <远端名> <host> [port]`：`-l -` 表示
+    从 stdin 读、`-p` 是 put。**端口是独立的第二个位置参数**，不是
+    `host:port`（busybox 的 tftp 只认这种形式，写成冒号会被当成主机名）。
+    """
+    fname = f"mtd{i}_{name}.bin"
+    filepath = os.path.join(backup_dir, fname)
+    print(f"  → 备份 mtd{i} ({name}) ...")
+    try:
+        os.remove(filepath)
+    except OSError:
+        pass
+
+    hostport = local_ip if port == 69 else f"{local_ip} {port}"
+    cmd = (f"dd if=/dev/mtd{i} bs=1M 2>/dev/null | "
+           f"tftp -p -l - -r {fname} {hostport}")
+    drain(tn)
+    tn.write(cmd.encode() + b"\n")
+    got = wait_for(tn, "#", timeout=max(60, _expected_size(i) // 1024 // 512))
+    if not got:
+        print(f"[!] 读取 mtd{i} ({name}) 失败（等待提示符超时）")
+        sys.exit(1)
+    _check_backup_file(i, name, filepath)
+
+
+def backup_all_partitions(tn, local_ip, backup_dir):
+    """备份所有 MTD 分区到 backup_dir。
+
+    两种传输方式，按机型选（BACKUP_TRANSPORT）：
+      - curl：设备侧 dd 直读，curl PUT 到主机的临时 HTTP 服务器（贝尔实测
+        有 curl 7.77）。请求-响应模型，不存在"监听起晚了就丢数据"的竞态。
+      - tftp：设备侧 dd 直读，busybox tftp 推到主机的临时 TFTP 服务器
+        （烽火按官方教程就是这么备份的；它的 busybox 不一定带 curl）。
+    两者都是每个分区独立一次传输，失败可单独重试，不会污染其它分区。
     """
     os.makedirs(backup_dir, exist_ok=True)
     print(f"[*] 备份目录: {backup_dir}")
 
-    if not device_has_curl(tn):
-        print("[!] 设备上没有 curl，无法使用 HTTP 方式备份。")
-        print("[!] 可改用其它方式（如 tftp / ftpput），或确认 busybox 是否带 wget。")
+    # 传输方式：机型指定 curl/tftp，auto 则先探测设备有没有 curl
+    transport = BACKUP_TRANSPORT
+    if transport == "auto":
+        transport = "curl" if device_has_curl(tn) else "tftp"
+    if transport == "curl" and not device_has_curl(tn):
+        print("[*] 设备上没有 curl，改用 tftp 传输。")
+        transport = "tftp"
+    if transport == "tftp" and not device_has_tftp(tn):
+        print("[!] 设备上既没有 curl 也没有 tftp，无法备份。")
         sys.exit(1)
 
-    with TempFileServer(serve_dir=backup_dir, recv_dir=backup_dir,
-                        allow_ip=ROUTER_IP, port=LOCAL_HTTP_PORT) as srv:
-        print(f"[*] 主机临时 HTTP 服务器: http://{local_ip}:{LOCAL_HTTP_PORT}")
-        print("[*] 开始备份所有 MTD 分区（使用 dd + curl 上传）...")
-        for i, name in _mtd_pairs():
-            fname = f"mtd{i}_{name}.bin"
-            filepath = os.path.join(backup_dir, fname)
-            print(f"  → 备份 mtd{i} ({name}) ...")
-            # 先删掉可能存在的旧文件，避免把上次的残留误判成本次成功
-            try:
-                os.remove(filepath)
-            except OSError:
-                pass
-
-            cmd = (f"dd if=/dev/mtd{i} bs=1M 2>/dev/null | "
-                   f"curl -s -T - http://{local_ip}:{LOCAL_HTTP_PORT}/{fname}")
-            drain(tn)                       # 先排空，避免上一步的 '#' 让它立刻返回
-            tn.write(cmd.encode() + b"\n")
-            # 大分区（如 all_flash 236MB）需要更长时间，按大小给足超时
-            got = wait_for(tn, "#", timeout=max(60, _expected_size(i) // 1024 // 512))
-            if not got:
-                print(f"[!] 读取 mtd{i} ({name}) 失败（等待提示符超时）")
-                sys.exit(1)
-
-            size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
-            if size == 0:
-                print(f"[!] mtd{i} ({name}) 备份为空，中止以免留下不完整备份")
-                sys.exit(1)
-            expected = MTD_SIZES.get(i)
-            if expected and size != expected:
-                print(f"[!] mtd{i} ({name}) 大小不符：收到 {size}，期望 {expected}")
-                sys.exit(1)
-            print(f"    → {filepath} ({size} 字节)")
+    pairs = _mtd_pairs()
+    if transport == "curl":
+        with TempFileServer(serve_dir=backup_dir, recv_dir=backup_dir,
+                            allow_ip=ROUTER_IP, port=LOCAL_HTTP_PORT) as srv:
+            print(f"[*] 主机临时 HTTP 服务器: http://{local_ip}:{LOCAL_HTTP_PORT}")
+            print("[*] 开始备份所有 MTD 分区（使用 dd + curl 上传）...")
+            for i, name in pairs:
+                _backup_one_curl(tn, i, name, local_ip, backup_dir)
+    else:
+        with _TftpReceiver(recv_dir=backup_dir, allow_ip=ROUTER_IP,
+                           port=LOCAL_TFTP_PORT) as srv:
+            print(f"[*] 主机临时 TFTP 服务器: {local_ip}:{srv.port}（udp）")
+            print("[*] 开始备份所有 MTD 分区（使用 dd + tftp 上传）...")
+            for i, name in pairs:
+                _backup_one_tftp(tn, i, name, local_ip, backup_dir, srv.port)
+            if srv.errors:
+                print(f"[!] TFTP 传输中记录到 {len(srv.errors)} 个错误：")
+                for e in srv.errors[:5]:
+                    print("    -", e)
 
     # === 备份完成后写入清单（机型/序列号 + 每个文件的 SHA256）===
     # 清单是"下次遇到同一台设备可跳过备份"的判定依据：没有它就无法证明
@@ -1428,6 +1964,147 @@ def verify_mtd_hash(tn, index, expected_sha, label=None,
         time.sleep(interval)
 
 
+def find_stock2ubi(path=None):
+    """定位 an758x-stock2ubi 可执行文件，返回绝对路径；找不到返回 None。
+
+    查找顺序（同 find_resource 的思路：**工具目录优先**，方便用户自行替换）：
+      1. 显式 --stock2ubi-file 指定的路径（绝对路径直接用）
+      2. exe 所在目录（PyInstaller 打包后，二进制跟 exe 放一起）
+      3. 打包资源目录 sys._MEIPASS
+      4. 本模块所在目录（源码运行时就是项目根）
+      5. 当前工作目录
+    """
+    names = [path] if path else [STOCK2UBI_FILE]
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+        _mp = getattr(sys, "_MEIPASS", None)
+        if _mp:
+            roots.append(_mp)
+    roots.append(os.path.dirname(os.path.abspath(__file__)))
+    roots.append(os.getcwd())
+
+    for name in names:
+        if not name:
+            continue
+        if os.path.isabs(name):
+            if os.path.isfile(name):
+                return name
+            continue
+        for root in roots:
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                return os.path.abspath(cand)
+    return None
+
+
+def run_stock2ubi(tn, local_ip, filepath, ignore_kernel=False,
+                  open_browser=True):
+    """上传 an758x-stock2ubi 到设备 /tmp、chmod +x、后台运行，等 3333 端口起来。
+
+    这一步只负责「把工具送上去并跑起来」。真正刷 U-Boot 的动作在它自己的网页里
+    （http://设备IP:3333/）：先备份需要保留的分区，再上传对应机型的
+    preloader.bin / firstblock.bin 和 AN758x U-Boot 的 bl31-u-boot.fip，
+    重启后访问 http://192.168.0.1/ 继续安装。本工具不代劳那部分 ——
+    那是 pbs05/an758x-stock2ubi 的界面，由它自己实现最可靠。
+
+    设备侧是 aarch64 静态 ELF，不依赖固件里的库；启动时会检查内核 release
+    是否为 5.4.55（本机型正好是），--ignore-kernel-version 可跳过该检查。
+    """
+    fname = os.path.basename(filepath)
+    fdir = os.path.dirname(os.path.abspath(filepath)) or "."
+    size = os.path.getsize(filepath)
+    local_sha = _sha256sum(filepath)
+    print(f"[*] an758x-stock2ubi: {filepath}（{size} 字节）")
+    print(f"    SHA256 {local_sha}")
+
+    if not device_has_curl(tn):
+        print("[!] 设备上没有 curl，无法使用 HTTP 方式上传 an758x-stock2ubi。")
+        sys.exit(1)
+
+    # --- 1. 上传到 /tmp ---
+    with TempFileServer(serve_dir=fdir, recv_dir=".", allow_ip=ROUTER_IP,
+                        port=LOCAL_HTTP_PORT) as srv:
+        print(f"[*] 主机临时 HTTP 服务器: http://{local_ip}:{LOCAL_HTTP_PORT}")
+        url = f"http://{local_ip}:{LOCAL_HTTP_PORT}/{urllib_parse.quote(fname)}"
+        tn.write(f"curl -s -o {STOCK2UBI_REMOTE} {url}\n".encode())
+        if not wait_for(tn, "#", timeout=180):
+            print("[!] an758x-stock2ubi 上传超时")
+            sys.exit(1)
+
+    # --- 2. 校验大小与 SHA256（1MB 左右，传坏了要立刻发现）---
+    out = run_cmd(tn, f"ls -l {STOCK2UBI_REMOTE}; sha256sum {STOCK2UBI_REMOTE}",
+                  timeout=60)
+    print("   ", (out or "").strip().replace("\n", "\n    "))
+    m = re.search(r"\b([0-9a-f]{64})\b", out or "")
+    if not m or m.group(1) != local_sha:
+        print(f"[!] 上传校验失败：期望 {local_sha}，设备上得到 {m.group(1) if m else '(无输出)'}")
+        sys.exit(1)
+    print("[✓] 上传校验通过（SHA256 一致）")
+
+    # --- 3. 加执行权限 ---
+    run_cmd(tn, f"chmod +x {STOCK2UBI_REMOTE}", timeout=30)
+
+    # --- 4. 后台运行 ---
+    # 先杀掉可能还在跑的旧实例，否则 3333 端口被占、新实例会绑定失败。
+    run_cmd(tn, f"killall an758x-stock2ubi 2>/dev/null; echo KILLED=$?", timeout=30)
+
+    args = ""
+    if ignore_kernel:
+        args += " --ignore-kernel-version"
+        print("[*] 已加 --ignore-kernel-version（跳过内核 release 5.4.55 检查）")
+    log = "/tmp/an758x-stock2ubi.log"
+    # nohup + 重定向 + </dev/null：telnet 断开时不给它发 SIGHUP，也不会因
+    # stdin 关闭而退出，所以工具能在会话结束后继续在后台跑。
+    launch = (f"nohup {STOCK2UBI_REMOTE}{args} "
+              f"--listen 0.0.0.0:{STOCK2UBI_PORT} >{log} 2>&1 </dev/null & "
+              f"echo S2U_PID=$!")
+    print(f"[*] 后台启动: {launch}")
+    out = run_cmd(tn, launch, timeout=30)
+    pid_m = re.search(r"S2U_PID=(\d+)", out or "")
+    print(f"[*] 进程 PID: {pid_m.group(1) if pid_m else '(未取到)'}")
+
+    # --- 5. 等 3333 端口起来 ---
+    print(f"[*] 等待 {STOCK2UBI_PORT} 端口就绪（最多 {STOCK2UBI_WAIT} 秒）...")
+    deadline = time.time() + STOCK2UBI_WAIT
+    ready = False
+    while time.time() < deadline:
+        if is_port_open(ROUTER_IP, STOCK2UBI_PORT, timeout=3):
+            ready = True
+            break
+        time.sleep(2)
+
+    log_out = run_cmd(tn, f"tail -n 20 {log}", timeout=30) or ""
+    log_out = log_out.strip()
+    if log_out:
+        print("[*] an758x-stock2ubi 启动日志:")
+        for line in log_out.split("\n"):
+            print("    " + line)
+
+    if not ready:
+        print(f"[!] {STOCK2UBI_WAIT} 秒内 {STOCK2UBI_PORT} 端口未就绪。")
+        if "kernel" in log_out.lower() and "5.4.55" in log_out:
+            print("[!] 看起来是内核版本检查没过，可加 --stock2ubi-ignore-kernel 重试。")
+        print(f"[!] 也可以 telnet 上去手动看日志: tail -n 50 {log}")
+        sys.exit(1)
+
+    url = f"http://{ROUTER_IP}:{STOCK2UBI_PORT}/"
+    print(f"\n[✓] an758x-stock2ubi 已在设备后台运行。")
+    print(f"    打开 {url} 继续：先备份需要保留的分区，再上传对应机型的")
+    print(f"    preloader.bin / firstblock.bin 与 AN758x U-Boot 的 bl31-u-boot.fip。")
+    print(f"    重启后访问 http://192.168.0.1/ 继续安装（首次进入恢复页可能要约一分钟）。")
+    print(f"    项目地址: {STOCK2UBI_PROJECT_URL}")
+    print(f"    U-Boot 项目地址: {STOCK2UBI_UBOOT_URL}")
+
+    if open_browser:
+        try:
+            import webbrowser
+            opened = webbrowser.open(url)
+            print(f"[*] 已尝试用默认浏览器打开 {url}（{'成功' if opened else '未成功，请手动打开'}）")
+        except Exception as e:  # noqa: BLE001
+            print(f"[*] 自动打开浏览器失败（{e}），请手动打开 {url}")
+
+
 def _unique_backup_dir():
     """生成不冲突的备份目录名（同一秒内多次运行 / GUI 里连续点两次时用得上）。"""
     base = f"backup_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -1452,6 +2129,7 @@ def run_flow(args, confirm_flash=None):
         "ftp":    "仅开启 FTP（su 提权用，不备份、不刷机）",
         "backup": "开启 Telnet + FTP + 备份全部分区（不刷机）",
         "flash":  "开启 Telnet + FTP + 备份 + 刷写 U-Boot（危险！）",
+        "stock2ubi": "开启 Telnet + FTP + 后台运行 an758x-stock2ubi（网页里刷）",
     }[mode]
     print("=" * 60)
     print(f"  XG-040G-MD 工具 v{VERSION}  ·  运行模式: {mode} — {mode_desc}")
@@ -1490,19 +2168,43 @@ def run_flow(args, confirm_flash=None):
     # === 2. 准备环境 ===
     # 只有 backup / flash 真正用到本机 IP（给设备 curl 回传分区用），
     # telnet 和 ftp 模式只是开关服务，不必探测。
+    # 走 TTL 时设备可能压根没联网，所以也不探测本机 IP（除非确实要传文件）。
+    use_serial = bool(args.get("serial_port"))
     local_ip = None
-    if mode in ("backup", "flash"):
+    if mode in ("backup", "flash", "stock2ubi") and not use_serial:
         local_ip = get_local_ip(ROUTER_IP)
         # 如果你使用WSL2请使用本地IP地址，WSL内运行可能无法正确获得本地IP。
         # local_ip = STATIC_LOCAL_IP
         print(f"[*] 本机 IP: {local_ip}")
 
+    # === 2b. TTL 模式：跳过所有联网步骤 ===
+    # 串口线接上就是 root shell，不需要开 Telnet/FTP，也不需要超级密码。
+    if use_serial:
+        print("[*] TTL 模式：直接走串口控制台，跳过开启 Telnet / FTP 的联网步骤。")
+        if mode in ("telnet", "ftp"):
+            print(f"[!] --mode {mode} 是「通过网页开服务」，与 TTL 无关。")
+            print("[!] TTL 直接就是 root shell，不需要开任何服务；"
+                  "请改用 --mode backup 备份或 --mode flash 刷机。")
+            sys.exit(1)
+        if mode in ("backup", "flash", "stock2ubi"):
+            # 串口回传分区仍需要一个主机 HTTP 服务，所以要本机 IP。
+            local_ip = local_ip or get_local_ip(ROUTER_IP)
+            print(f"[*] 本机 IP: {local_ip}（设备通过它回传分区）")
+
     # === 3. 自动开启 Telnet（免拆机） ===
     # telnet 与 ftp 是两个独立开关：--mode ftp 只碰 21 端口，不动 telnet。
-    if mode == "ftp":
+    if use_serial:
+        print("[*] TTL 模式：跳过开启 Telnet 步骤。")
+    elif mode == "ftp":
         print("[*] 模式 ftp：只开 FTP，跳过 Telnet 步骤。")
     elif args["enable_telnet"]:
-        enable_telnet_via_web()
+        if TELNET_ENABLE_MODE == "fhtool":
+            enable_telnet_via_fhtool(MODEL_MAC)
+        elif SUPPORTS_WEB_TELNET:
+            enable_telnet_via_web()
+        else:
+            print("[*] 本机型没有可用的自动开启 Telnet 方式，跳过该步骤；"
+                  "请先手动开启 Telnet 再运行。")
     else:
         print("[*] --no-enable-telnet：跳过自动开启 Telnet（假定已手动开启）。")
 
@@ -1510,8 +2212,13 @@ def run_flow(args, confirm_flash=None):
     # 顺序很重要：必须先开 FTP，user_ftp 账号才会被注入 /etc/passwd，
     # 否则后面的 su user_ftp 一定报 unknown user，拿不到 root。
     # 注意：telnet 模式只碰 23 端口，不碰 FTP；需要开 FTP 请用 --mode ftp。
-    if mode == "telnet":
+    # 烽火机型不需要 FTP 就能 su root，所以整段跳过（别去开一个没用的服务）。
+    if use_serial:
+        print("[*] TTL 模式：跳过开启 FTP 步骤（串口直接是 root）。")
+    elif mode == "telnet":
         print("[*] 模式 telnet：只开 Telnet，跳过 FTP 步骤。")
+    elif not NEED_FTP_FOR_SU:
+        print("[*] 本机型提权不需要 FTP，跳过 FTP 步骤。")
     elif args["enable_ftp"]:
         enable_ftp_via_web()
     else:
@@ -1528,8 +2235,33 @@ def run_flow(args, confirm_flash=None):
         print("    需要备份请运行: python3 flash.py --mode backup")
         return
 
-    # === 4. Telnet 登录 ===
-    tn = telnet_login()
+    # === 4. 连接设备：TTL 串口 或 telnet，二选一 ===
+    # 两条路的产物都是同一个 tn 对象（串口那边是 SerialShell，接口与
+    # telnetlib3.Telnet 一致），所以后面的分区表读取 / 备份 / 刷写 / 校验
+    # 全部原样复用，不需要为 TTL 再写一份实现。
+    if use_serial:
+        tn = serial_login_flow(args)
+    else:
+        tn = telnet_login()
+
+    # === 4a. stock2ubi 模式：上传并后台运行，然后结束 ===
+    # 它自带 HTTP 服务，后续的备份分区 / 上传 preloader + bl31-u-boot.fip /
+    # 重启进恢复页都在它自己的网页里完成，本工具不代劳。
+    if mode == "stock2ubi":
+        path = find_stock2ubi(args.get("stock2ubi_file"))
+        if not path:
+            print(f"[!] 找不到 an758x-stock2ubi 文件（默认文件名 {STOCK2UBI_FILE}）。")
+            print("[!] 请把它放到本工具同目录，或用 --stock2ubi-file 指定路径。")
+            print(f"[!] 下载地址: {STOCK2UBI_PROJECT_URL}")
+            tn.close()
+            sys.exit(1)
+        run_stock2ubi(tn, local_ip, path,
+                      ignore_kernel=args.get("stock2ubi_ignore_kernel", False))
+        tn.close()
+        print("\n[✓] 操作完成！an758x-stock2ubi 仍在设备后台运行。")
+        print(f"    项目地址: {STOCK2UBI_PROJECT_URL}")
+        print(f"    U-Boot 项目地址: {STOCK2UBI_UBOOT_URL}")
+        return
 
     # === 4b. 读取设备真实分区表 ===
     # 必须在备份之前读：不同机型/固件的分区数量与大小都不一样，写死默认表
@@ -1605,10 +2337,49 @@ def run_flow(args, confirm_flash=None):
         print(f"   - 完整备份位于: {backup_dir_used}")
 
 
+def _load_model_globals(model_key=None):
+    """按机型把固定值写进本模块的全局变量。
+
+    命令行跑 flash.py 时没有 config.ini 参与，所以这里直接读机型档案：
+    端口、超级账号、telnet 账号、su 账号、功能开关全部以机型为准。
+    密码类的（telnet/su）仍需用户提供或由 MAC 推导，见 --model 的说明。
+    """
+    global MODEL, WEB_PORT, NEED_FTP_FOR_SU, SUPPORTS_WEB_TELNET
+    global SUPPORTS_STOCK2UBI, SUPPORTS_UBOOT_FLASH
+    global MODEL_TELNET_USER, MODEL_SU_USER, SUPER_USER, SUPER_PASSWORD
+    global TELNET_PORT, TELNET_ENABLE_MODE, BACKUP_TRANSPORT
+    try:
+        import models as models_mod
+    except Exception:
+        return None                      # 没有 models.py 就沿用配置区默认值
+    m = models_mod.get(model_key or models_mod.DEFAULT_MODEL)
+    MODEL = m
+    WEB_PORT = m.web_port
+    NEED_FTP_FOR_SU = m.need_ftp_for_su
+    SUPPORTS_WEB_TELNET = m.supports_web_telnet
+    SUPPORTS_STOCK2UBI = m.supports_stock2ubi
+    SUPPORTS_UBOOT_FLASH = m.supports_uboot_flash
+    MODEL_TELNET_USER = m.telnet_user
+    MODEL_SU_USER = m.su_user
+    TELNET_PORT = m.telnet_port
+    TELNET_ENABLE_MODE = m.telnet_enable
+    BACKUP_TRANSPORT = m.backup_transport
+    if m.super_user:
+        SUPER_USER = m.super_user
+    if m.super_password:
+        SUPER_PASSWORD = m.super_password
+    return m
+
+
 def main():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(current_dir)
     args = parse_args(sys.argv[1:])
+    m = _load_model_globals(args.get("model"))
+    if m is not None:
+        print(f"[*] 机型: {m.name}")
+        if m.key == "bel" and args.get("model"):
+            pass
     run_flow(args)
 
 
