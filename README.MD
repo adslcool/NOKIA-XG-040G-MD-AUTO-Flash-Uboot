@@ -68,7 +68,7 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
    |---|---|---|
    | ① | 刷写 BL2 | `preloader.bin`（或 `firstblock.bin`） |
    | ② | 重建 UBI | 直接点，会清空 UBI 内数据 |
-   | ③ | 板级数据 | 本机备份的 `mtd13_factory.bin`（1.0 MiB） |
+   | ③ | 板级数据 | 本工具自动生成的 `factory-1m.bin`（1.0 MiB） |
    | ④ | 刷写 U-Boot | `bl31-u-boot.fip` |
    | ⑤ | 刷写系统 | QWRT / PONWRT 的 `sysupgrade.bin` 或 `.itb` |
    | ⑥ | 启动系统 | 首次约 1~3 分钟，别断电 |
@@ -79,6 +79,18 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
    >
    > 重建 UBI 只清 UBI 里的数据，不动 preloader 和 U-Boot；但这两块
    > boot 区一旦缺失，重建后再也起不来，只能拆机接串口用 XMODEM 救砖。
+
+   **第 ③ 步用 `factory-1m.bin`，不是 `mtd13_factory.bin`。** 原厂的
+   factory 分区是 3 MiB 的 JFFS2/UBI 容器，U-Boot 那一栏只认 1.0 MiB。
+   本工具在备份完成后会自动从 `mtd13_factory.bin` 里提取 PON 校准和
+   Wi-Fi EEPROM，按 OpenWrt 的 1 MiB 布局（`an7581-fiberhome-ubi-parts.dtsi`）
+   重新拼一份 `factory-1m.bin` 放进备份目录，日志里会打印读到的
+   基础 MAC / PON SN / 整机 SN / 校准数据是否齐全。
+
+   为什么必须做这一步：群里有人刷完 PONWRT 后「无线网和光驱动用不了」，
+   就是因为把 3 MiB 的原厂 factory 直接传给了 U-Boot 那一栏。手动生成
+   要用 [fiberhome-factory](https://github.com/22p/fiberhome-factory) 图形
+   工具，新手极易漏掉。
 
 5. **断电警告**——界面上常驻一条红框警告：刷机过程中绝对不能断电；
    重启后必须立刻访问 `http://192.168.0.1` 继续完成安装；否则光猫变砖，

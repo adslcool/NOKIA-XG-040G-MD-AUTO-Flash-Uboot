@@ -72,6 +72,9 @@ datas = [
     ("models.py", "."),
     ("fhtool.py", "."),
     ("serial_shell.py", "."),
+    # fhfactory.py 是 flash.py 在烽火备份后动态 import 的（生成 1 MiB factory），
+    # 静态分析看不到，必须作为数据文件一起打包。
+    ("fhfactory.py", "."),
 ]
 # tcboot.bin 是可选的：存在就一起打包，作为「找不到外部文件」时的兜底
 if os.path.isfile("tcboot.bin"):

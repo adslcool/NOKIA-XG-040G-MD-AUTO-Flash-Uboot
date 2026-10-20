@@ -475,9 +475,11 @@ class App:
              "    首次刷机必须先重建，否则后面的分区写不进去。\n"
              "    ⚠️ 重建前必须已经完成第 1 步（preloader 已写入），否则必砖！"),
             ("3", "刷入板级数据 factory",
-             "上传第 ② 步备份出来的 mtd13_factory.bin（1.0 MiB），\n"
-             "    点「上传并写入」。这是本机唯一的校准数据，丢了 WiFi/光功率会异常，\n"
-             "    而且别的机器上的 factory 不能混用。"),
+             "上传备份目录里的 factory-1m.bin（正好 1.0 MiB，程序自动生成），\n"
+             "    点「上传并写入」。这是本机唯一的校准数据（PON 校准 + WiFi EEPROM），\n"
+             "    丢了 WiFi 和光模块都不工作，别的机器的 factory 也不能混用。\n"
+             "    ⚠️ 不要上传 mtd13_factory.bin —— 那是 3 MiB 的原厂容器，\n"
+             "    这一栏只认 1.0 MiB。"),
             ("4", "刷写 U-Boot",
              "上传 bl31-u-boot.fip，点「上传并写入」。\n"
              "    这个文件从 pbs05/uboot-an758x 发布页下载（见下方链接）。"),
@@ -515,8 +517,10 @@ class App:
 
         ttk.Label(
             steps, foreground="#666", wraplength=940, justify="left",
-            text="第 3 步的 factory 数据来自本工具第 ② 步的自动备份"
-                 "（backup_日期_时间/mtd13_factory.bin）。\n"
+            text="第 3 步用 backup_日期_时间/factory-1m.bin —— 这是本工具在备份完"
+                 "自动从 mtd13_factory.bin 里提取 PON 校准和 WiFi EEPROM、\n"
+                 "按 OpenWrt 的 1 MiB 布局重新拼好的文件。原厂的 mtd13_factory.bin 是"
+                 "3 MiB 的 JFFS2/UBI 容器，不能直接上传。\n"
                  "务必用这台机器自己的备份，不要用别人的。"
         ).pack(anchor="w", pady=(2, 0))
 
@@ -1142,7 +1146,8 @@ class App:
                 "网页里的刷写顺序（顺序错了会变砖）：\n"
                 "  ① 刷写 BL2 —— 上传 preloader.bin / firstblock.bin\n"
                 "  ② 重建 UBI（首次刷机必须先做）\n"
-                "  ③ 板级数据 —— 上传刚备份的 factory 分区\n"
+                "  ③ 板级数据 —— 上传刚生成的 factory-1m.bin（1.0 MiB，\n"
+                "     不是 mtd13_factory.bin）\n"
                 "  ④ 刷写 U-Boot —— 上传 bl31-u-boot.fip\n"
                 "  ⑤ 刷写系统 —— 上传 QWRT / PONWRT 的 sysupgrade\n"
                 "  ⑥ 启动系统\n\n"
@@ -1193,7 +1198,7 @@ class App:
                 "  3. 备份完打开它的网页，你在网页里按这个顺序刷：\n"
                 "       ① 刷写 BL2 —— 上传 preloader.bin\n"
                 "       ② 重建 UBI（会清空 UBI 内数据，首次刷机必须先做）\n"
-                "       ③ 板级数据 —— 上传刚备份的 mtd13_factory.bin\n"
+                "       ③ 板级数据 —— 上传 factory-1m.bin（1.0 MiB，自动生成）\n"
                 "       ④ 刷写 U-Boot —— 上传 bl31-u-boot.fip\n"
                 "       ⑤ 刷写系统 —— 上传 QWRT / PONWRT 的 sysupgrade\n"
                 "       ⑥ 启动系统（首次约 1~3 分钟，别断电）\n"
@@ -1274,6 +1279,15 @@ def self_test():
     except Exception as e:  # noqa: BLE001
         print(f"  [!] fhtool 后端不可用（{type(e).__name__}: {e}）"
               " —— 只有烽火机型需要")
+
+    # 2b-2. 烽火 factory 镜像生成（备份后自动调用，缺了烽火刷机就少一步）
+    try:
+        import fhfactory
+        print(f"  [✓] fhfactory（1 MiB factory 生成可用，"
+              f"布局 {fhfactory.FACTORY_SIZE} 字节）")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"缺模块 fhfactory: {type(e).__name__}: {e}")
+        print(f"  [✗] fhfactory — {e}")
 
     # 2c. 机型注册表
     try:

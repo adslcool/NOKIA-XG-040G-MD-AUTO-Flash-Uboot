@@ -44,6 +44,8 @@ _probe_after_reset.py
 _polyfill.js
 _xhr.js
 _telsu.tar.gz
+_*.py
+_*.log
 
 # CI / 本地发版时生成的 Release 说明与更新日志片段
 _release_notes.md
@@ -54,3 +56,15 @@ _stub/
 
 # 恩山发帖草稿（含个人下载链接，不入库）
 恩山发帖.md
+
+#忽略不需要的东西
+fiberhome-factory
+HG5585F-CT-Telnet
+fiberhome-factory-新.exe
+enable_telnet.py
+_bk_s2u
+_bktest
+_decwork
+_fw_rootfs
+_webjs
+esp32c3_ttl_bridge

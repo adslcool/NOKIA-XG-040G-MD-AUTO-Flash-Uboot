@@ -91,6 +91,13 @@ MODEL_SU_PASSWORD = ""           # 机型固定 su 密码
 MODEL_SU_PASSWORD_PREFIX = ""    # su 密码的 MAC 前缀（烽火 Fh@）
 TELNET_ENABLE_MODE = "web"       # 开 telnet 的方式：web / fhtool / manual
 BACKUP_TRANSPORT = "auto"        # 备份传输：curl / tftp / auto（先试 curl）
+MODEL_FAMILY = "bel"             # 机型家族：bel / fh（决定是否生成 1 MiB factory）
+# 备份后自动生成的 OpenWrt 用 factory 镜像文件名。
+# 为什么要生成：刷 OpenWrt 时 U-Boot 里要单独刷 factory 数据，而原厂 factory
+# 分区是 3 MiB 的 JFFS2/UBI 容器，不能直接喂给 U-Boot，必须按
+# an7581-fiberhome-ubi-parts.dtsi 的 1 MiB 布局重新拼一份（见 fhfactory.py）。
+# 手动做要用 fiberhome-factory 图形工具，新手极易漏掉 —— 漏了就无线/光模块全废。
+FACTORY_1M_NAME = "factory-1m.bin"
 
 # --- telnet 登录失败后的自动重启 ---
 # 光猫对连续认证失败有阈值（贝尔实测 3 次锁 300 秒），一旦触发就只能等或重启。
@@ -2260,6 +2267,14 @@ def backup_all_partitions(tn, local_ip, backup_dir, transport=None):
                 for e in srv.errors[:5]:
                     print("    -", e)
 
+    # === 烽火：从 factory 分区生成 OpenWrt 用的 1 MiB factory 镜像 ===
+    # 为什么必须自动做：刷 OpenWrt 时 U-Boot 里要单独刷入 factory 数据，
+    # 而设备原厂的 factory 分区是 3 MiB 的 JFFS2/UBI 容器，不能直接喂给
+    # U-Boot —— 必须先按 an7581-fiberhome-ubi-parts.dtsi 的 1 MiB 布局
+    # 重新拼一份。手动做要用 fiberhome-factory 图形工具，新手极易漏掉
+    # 这一步，刷完就会出现「无线网和光驱动都用不了」。
+    _maybe_build_factory_1m(backup_dir)
+
     # === 备份完成后写入清单（机型/序列号 + 每个文件的 SHA256）===
     # 清单是"下次遇到同一台设备可跳过备份"的判定依据：没有它就无法证明
     # 这份备份完整且属于当前设备。
@@ -2275,6 +2290,65 @@ def backup_all_partitions(tn, local_ip, backup_dir, transport=None):
     sn = info.get("SerialNumber", "未知")
     model = info.get("ModelName", "未知")
     print(f"[✓] 设备信息: {model} / SN {sn}")
+
+def _find_factory_partition(backup_dir):
+    """在备份目录里找 factory 分区文件，返回路径或 None。
+
+    不同机型的分区名不一样（烽火叫 factory，某些 AN7581 叫 fhdata 或
+    factory_data），所以按「文件名里带 factory」优先，其次按 mtd 号找
+    名字含 factory 的分区。
+    """
+    try:
+        names = sorted(os.listdir(backup_dir))
+    except OSError:
+        return None
+    for fn in names:
+        if fn.endswith(".bin") and "factory" in fn.lower() and "1m" not in fn.lower():
+            return os.path.join(backup_dir, fn)
+    return None
+
+def _maybe_build_factory_1m(backup_dir):
+    """烽火机型备份后自动生成 OpenWrt 用的 1 MiB factory 镜像。
+
+    生成失败不影响备份本身（备份已经落盘），只打印警告 —— 用户可以
+    之后用 fiberhome-factory 图形工具手工生成。
+    """
+    if MODEL_FAMILY != "fh":
+        return
+    src = _find_factory_partition(backup_dir)
+    if not src:
+        print("[!] 备份里没找到 factory 分区，跳过 1 MiB factory 镜像生成。")
+        print("    刷 OpenWrt 前需要手工生成，否则无线和光模块会不工作。")
+        return
+    out = os.path.join(backup_dir, FACTORY_1M_NAME)
+    if os.path.isfile(out) and os.path.getsize(out) == 0x100000:
+        print(f"[✓] {FACTORY_1M_NAME} 已存在，跳过生成。")
+        return
+    print(f"[*] 正在从 {os.path.basename(src)} 生成 {FACTORY_1M_NAME} ...")
+    try:
+        import fhfactory
+        data = open(src, "rb").read()
+        files, warning = fhfactory.extract_files(data)
+        if warning:
+            print(f"[!] {warning}")
+        image = fhfactory.build_factory_image(files)
+        info = fhfactory.describe(image)
+        with open(out, "wb") as f:
+            f.write(image)
+    except Exception as e:
+        print(f"[!] 生成 {FACTORY_1M_NAME} 失败：{e}")
+        print("    不影响备份本身。可以稍后用 fiberhome-factory 图形工具手工生成：")
+        print("    https://github.com/22p/fiberhome-factory")
+        return
+    print(f"[✓] 已生成 {FACTORY_1M_NAME}（{len(image)} 字节）")
+    print(f"    基础 MAC: {info['mac']}")
+    print(f"    PON SN  : {info['pon_sn']}")
+    print(f"    整机 SN : {info['device_sn']}")
+    print(f"    PON 校准: {'有' if info['pon_present'] else '无'}"
+          f"    Wi-Fi EEPROM: {'有' if info['wifi_present'] else '无'}")
+    if not info["pon_present"] or not info["wifi_present"]:
+        print("[!] 注意：缺 PON 校准或 Wi-Fi EEPROM，刷完 OpenWrt 后")
+        print("    光模块或无线可能不工作。请确认 factory 分区备份完整。")
 
 def _expected_size(idx: int) -> int:
     """取该分区的期望字节数（优先实时分区表）；未知则给一个宽松的默认值。"""
@@ -2527,7 +2601,7 @@ def run_stock2ubi(tn, local_ip, filepath, ignore_kernel=False,
     print(f"    ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
     print(f"    ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
     print(f"       ⚠️ 没刷 preloader 就重建 UBI = 必砖")
-    print(f"    ③ 板级数据      —— 上传本机备份的 factory 分区")
+    print(f"    ③ 板级数据      —— 上传 backup_*/{FACTORY_1M_NAME}（1.0 MiB，非 mtd13）")
     print(f"    ④ 刷写 U-Boot   —— 上传 bl31-u-boot.fip")
     print(f"    ⑤ 刷写系统      —— 上传 QWRT / PONWRT 的 sysupgrade")
     print(f"    ⑥ 启动系统      —— 首次约 1~3 分钟，别断电")
@@ -2736,6 +2810,8 @@ def run_flow(args, confirm_flash=None):
 
         if skipped_dir:
             backup_dir_used = skipped_dir
+            # 旧备份可能是本功能之前做的，里面没有 factory-1m.bin，补一份
+            _maybe_build_factory_1m(skipped_dir)
         else:
             this_dir = _unique_backup_dir()
             backup_all_partitions(tn, local_ip, this_dir, transport="stock2ubi")
@@ -2750,7 +2826,7 @@ def run_flow(args, confirm_flash=None):
         print(f"      ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
         print(f"      ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
         print(f"         ⚠️ 没刷 preloader 就重建 UBI = 必砖")
-        print(f"      ③ 板级数据      —— 上传本机备份的 factory 分区")
+        print(f"      ③ 板级数据      —— 上传 backup_*/{FACTORY_1M_NAME}（1.0 MiB，非 mtd13）")
         print(f"      ④ 刷写 U-Boot   —— 上传 bl31-u-boot.fip")
         print(f"      ⑤ 刷写系统      —— 上传 QWRT / PONWRT 的 sysupgrade")
         print(f"      ⑥ 启动系统      —— 首次约 1~3 分钟，别断电")
@@ -2806,6 +2882,8 @@ def run_flow(args, confirm_flash=None):
 
         if skipped_dir:
             backup_dir_used = skipped_dir
+            # 旧备份可能是本功能之前做的，里面没有 factory-1m.bin，补一份
+            _maybe_build_factory_1m(skipped_dir)
         else:
             this_dir = _unique_backup_dir()
             backup_all_partitions(tn, local_ip, this_dir)
@@ -2877,6 +2955,7 @@ def _load_model_globals(model_key=None):
     MODEL_PASSWORD_PREFIX = m.telnet_password_prefix
     MODEL_TELNET_PASSWORD_FROM_MAC = m.telnet_password_from_mac
     TELNET_PASSWORD_TRY_MAC_SUFFIX = m.telnet_password_try_mac_suffix
+    MODEL_FAMILY = getattr(m, "family", "bel")
     MODEL_SU_PASSWORD = m.su_password
     MODEL_SU_PASSWORD_PREFIX = m.su_password_prefix
     if m.super_user:

@@ -207,6 +207,7 @@ def apply_model(cfg, flash, model=None):
     flash.MODEL_TELNET_PASSWORD_FROM_MAC = m.telnet_password_from_mac
     flash.MODEL_SU_PASSWORD = m.su_password
     flash.MODEL_SU_PASSWORD_PREFIX = m.su_password_prefix
+    flash.MODEL_FAMILY = getattr(m, "family", "bel")
     return m
 
 
@@ -253,6 +254,7 @@ def apply_fh_to_flash(cfg, flash):
     # 但保持与贝尔一致，避免 run_flow 里读到旧值
     flash.AUTO_ENABLE_TELNET = True
     flash.AUTO_ENABLE_FTP = False
+    flash.MODEL_FAMILY = getattr(m, "family", "bel")
     return m
 
 
