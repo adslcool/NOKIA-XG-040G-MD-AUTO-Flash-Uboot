@@ -78,6 +78,9 @@ datas = [
     # fhdecrypt.py 同理：只有 telnet 密码被拒时才动态 import（解 param.pdt.enc）。
     # 它是「密码找回」兜底通道的核心，漏打就等于这条功能在 exe 里不存在。
     ("fhdecrypt.py", "."),
+    # fhreport.py 是「导出诊断包」用的：把设备上密码相关的文件和密文打包成 zip
+    # 交给作者分析。同样是按钮回调里动态 import，静态分析看不到。
+    ("fhreport.py", "."),
 ]
 # tcboot.bin 是可选的：存在就一起打包，作为「找不到外部文件」时的兜底
 if os.path.isfile("tcboot.bin"):

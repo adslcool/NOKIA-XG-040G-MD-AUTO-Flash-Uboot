@@ -380,6 +380,10 @@ class App:
              "默认 telecomadmin"),
             ("fh", "super_password", "网页超级密码", False,
              "恢复出厂后的默认超级密码，默认 nE7jA%5m"),
+            ("fh", "telnet_password", "telnet 密码（选填）", True,
+             "留空=自动推导；本工具解不开时，可填别的工具解出的密码"),
+            ("fh", "su_password", "su 密码（选填）", True,
+             "留空=自动推导（Fh@+MAC后6位）；解不开时手动填"),
         ]
         self._build_account_rows(acct, rows, mac_probe=True)
 
@@ -387,7 +391,10 @@ class App:
             outer, foreground="#666", justify="left", wraplength=940,
             text="telnet 账号固定 telnetadmin，密码固定 FH-nE7jA%5m（程序会自动先试固定值，"
                  "再试带 MAC 后缀的流传写法）；提权 su root 的密码 = Fh@ + MAC 后 6 位大写。"
-                 "本机型不需要开启 FTP。")
+                 "本机型不需要开启 FTP。\n"
+                 "上面两个「选填」框只在自动推导失败时才需要填 —— 比如本工具内置的密钥"
+                 "覆盖不到你这台光猫的固件版本，而你自己用别的工具解出了真实密码。"
+                 "填了之后程序会优先用它，不再试其他候选。")
         note.pack(anchor="w", pady=(6, 0))
 
         # ===== 操作 =====
@@ -409,6 +416,12 @@ class App:
         self.btn_fh_reboot = ttk.Button(
             row, text="重启光猫", width=12, command=self.on_reboot)
         self.btn_fh_reboot.pack(side="left")
+
+        # 诊断包：telnet 密码解不开时，把设备上的密文/哈希/密钥表打包给作者。
+        # 放在这一行最右边，因为它是「出问题时才用」的兜底功能。
+        self.btn_fh_report = ttk.Button(
+            row, text="导出诊断包", width=13, command=self.on_fh_report)
+        self.btn_fh_report.pack(side="left", padx=(6, 0))
 
         row2 = ttk.Frame(ops)
         row2.pack(fill="x", pady=(8, 0))
@@ -861,7 +874,7 @@ class App:
         # 两个 tab 的按钮都要跟着忙闲切换（漏掉某个会让它在运行时仍可点）
         for name in ("btn_telnet", "btn_ftp", "btn_backup", "btn_reboot",
                      "btn_stock2ubi", "btn_probe_mac", "btn_fh_telnet",
-                     "btn_fh_stock2ubi", "btn_fh_reboot"):
+                     "btn_fh_stock2ubi", "btn_fh_reboot", "btn_fh_report"):
             b = getattr(self, name, None)
             if b is not None:
                 b.configure(state=state)
@@ -1221,6 +1234,41 @@ class App:
                       f"{'=' * 56}\n")
         self._start_worker(flash.run_flow, args)
 
+    def on_fh_report(self):
+        """烽火 tab：把设备上和密码相关的文件打包成诊断 zip，交给作者分析。
+
+        什么时候用：本工具解不出 telnet 密码（换了密钥表的新固件），而用户
+        又没有别的办法拿到密码。包里是设备上真实的密文、哈希、以及本地用过
+        的密钥和解密结果 —— 作者据此能判断是密钥不对、算法变了，还是容器头
+        是新的。全程只读下载，不改设备任何状态。
+        """
+        flash = self._prepare()
+        if flash is None:
+            return
+        if not messagebox.askyesno(
+                APP_TITLE,
+                "从光猫下载密码相关文件并打包？\n\n"
+                "会做这些事（都是只读，不改设备状态）：\n"
+                "  · 读取设备信息（型号 / SN / MAC / 固件版本）\n"
+                "  · 下载 /var/tel_passwd、/fhdata/pre_usrconfig_conf 等密码相关文件\n"
+                "  · 从里面切出密文片段，逐个试本地密钥并记录结果\n"
+                "  · 把本工具内置的密钥表一并写进去\n\n"
+                "⚠️ 包里有 MAC、PON SN、整机 SN、telnet 密码哈希，\n"
+                "   可能还有 Wi-Fi 密码等配置。只发给作者，不要公开贴到论坛。\n\n"
+                "确定开始吗？"):
+            self.log_line("[*] 已取消。\n")
+            return
+        self.log_line(f"\n{'=' * 56}\n[*] 开始：导出诊断包\n{'=' * 56}\n")
+
+        def _worker():
+            import fhreport
+            path = fhreport.collect(flash)
+            print(f"\n[✓] 诊断包已生成：{path}")
+            print("    把这个文件发给作者即可。")
+            return path
+
+        self._start_worker(_worker)
+
 
 def _missing_optional(problems, what, feature, howto):
     """报告一个「源码可选、打包必需」的依赖缺失。
@@ -1322,6 +1370,24 @@ def self_test():
     except Exception as e:  # noqa: BLE001
         problems.append(f"缺模块 fhdecrypt: {type(e).__name__}: {e}")
         print(f"  [✗] fhdecrypt — {e}")
+
+    # 2b-4. 诊断包（telnet 密码解不开时，把材料打包给作者）
+    try:
+        import fhreport
+        # 真切一段密文，确认「找密文 + 试解密」这条链路是通的。
+        # 用固件里的真实 UCI 片段（2502 容器的 TelnetPassword）。
+        sample = (b"option TelnetPassword "
+                  b"'250200008554F8E46C6E87B9A4DB8311D3A1EFEE'")
+        frags = fhreport._find_ciphertexts(
+            sample, fhdecrypt.ALL_MAGICS, limit=8)
+        if not frags:
+            raise RuntimeError("从 UCI 文本里切不出密文（切分逻辑失效）")
+        if frags[0].get("field") != "TelnetPassword":
+            raise RuntimeError(f"字段名识别错：{frags[0].get('field')!r}")
+        print(f"  [✓] fhreport（诊断包可用，密文切分 + 字段识别正常）")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"缺模块 fhreport: {type(e).__name__}: {e}")
+        print(f"  [✗] fhreport — {e}")
 
     # 2c. 机型注册表
     try:

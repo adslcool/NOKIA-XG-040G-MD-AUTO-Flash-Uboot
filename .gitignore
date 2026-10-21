@@ -70,3 +70,6 @@ _webjs
 esp32c3_ttl_bridge
 # telnet 密码找回时临时下载的配置文件
 _recover/
+# 诊断包：含设备 MAC / SN / 密码哈希，绝不能提交
+fh_report_*.zip
+_report_tmp/

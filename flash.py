@@ -9,6 +9,7 @@
     python3 flash.py --mode flash         # 开启 Telnet+FTP + 备份 + 刷写 U-Boot（危险）
     python3 flash.py --mode flash -y      # 跳过刷写前的 YES 二次确认
     python3 flash.py --mode stock2ubi     # 上传并后台运行 an758x-stock2ubi（网页里刷）
+    python3 flash.py --mode report        # 导出诊断包 zip（telnet 密码解不开时发给作者）
     python3 flash.py --no-enable-telnet   # 假定 Telnet 已手动开启，不走网页步骤
     python3 flash.py --no-enable-ftp      # 假定 FTP 已手动开启，不走网页步骤
     python3 flash.py --force-backup       # 即使已有同一台设备的完整备份也重新备份
@@ -114,6 +115,14 @@ AUTO_REBOOT_ASK = False            # True 则每次重启前询问（命令行�
 # **不写 config.ini** —— 用户没确认过的密码不该被持久化。
 # 它会被 _password_candidates() 排到候选第一位。
 _RECOVERED_PASSWORD = ""
+
+# --- 用户手动指定的 telnet / su 密码（界面或 config.ini 填的）---
+# 用途：本工具的内置密钥解不开某个新固件时，用户可能用别的工具（论坛脚本、
+# 厂商工具、自己逆向）解出了真实密码，那就让他直接填进来，程序优先用。
+# 与 PASSWORD / ROOT_PASSWORD 的区别：那两个会被机型档案覆盖（见
+# _load_model_globals），这两个**永远不覆盖**，用户填了就是最高优先级。
+MANUAL_TELNET_PASSWORD = ""
+MANUAL_SU_PASSWORD = ""
 
 # --- TTL / 串口控制台（拆机接线，不依赖网络）---
 # 与 telnet 路线的关系：两条路**二选一**。走 TTL 时完全不需要开 Telnet/FTP、
@@ -920,7 +929,7 @@ def parse_args(argv):
         elif a in ("-h", "--help"):
             print(__doc__ or "")
             print("用法: python3 flash.py "
-                  "[--mode telnet|ftp|backup|flash|stock2ubi] "
+                  "[--mode telnet|ftp|backup|flash|stock2ubi|report] "
                   "[--no-enable-telnet] [--no-enable-ftp] [--force-backup] "
                   "[--reboot] [--model bel|hg5585f] "
                   "[--stock2ubi-file 路径] "
@@ -931,9 +940,10 @@ def parse_args(argv):
         else:
             print(f"[!] 未知参数: {a}（用 --help 查看用法）")
             sys.exit(1)
-    if args["mode"] not in ("telnet", "ftp", "backup", "flash", "stock2ubi"):
+    if args["mode"] not in ("telnet", "ftp", "backup", "flash", "stock2ubi",
+                            "report"):
         print(f"[!] 非法模式: {args['mode']}"
-              "（可选 telnet / ftp / backup / flash / stock2ubi）")
+              "（可选 telnet / ftp / backup / flash / stock2ubi / report）")
         sys.exit(1)
     return args
 
@@ -1159,8 +1169,9 @@ def _prepend_password_candidate(password):
 def _password_candidates():
     """按可能性排序返回 telnet 密码候选（去重、去空）。
 
-    运行时找回的密码（`_RECOVERED_PASSWORD`，见 _try_recover_telnet_password）
-    永远排第一：它是从设备自己的配置里解出来的，比任何猜测都可靠。
+    优先级：用户手填的 > 运行时从设备找回的 > 机型静态候选。
+    手填的排最前是因为「本工具解不开、用户用别的工具解开了」这种情况下，
+    用户的答案比任何猜测都可靠，不该再让他白烧认证机会。
     """
     out = []
 
@@ -1168,7 +1179,9 @@ def _password_candidates():
         if p and p not in out:
             out.append(p)
 
-    # 0) 运行时从设备取回的真实密码（最高优先级）
+    # 0) 用户手动指定的密码（界面「手动指定」框 / config.ini [fh] 段）
+    _add(MANUAL_TELNET_PASSWORD)
+    # 1) 运行时从设备取回的真实密码
     _add(_RECOVERED_PASSWORD)
     return out + _password_candidates_static()
 
@@ -1218,6 +1231,8 @@ def _su_password_candidates():
         if p and p not in out:
             out.append(p)
 
+    # 0) 用户手动指定的 su 密码（本工具解不开、用户自己弄到了）
+    _add(MANUAL_SU_PASSWORD)
     # 1) 由 MAC 推导的（烽火：Fh@ + MAC 后 6 位，大写）
     if MODEL_SU_PASSWORD_PREFIX:
         suffix = (MODEL_MAC or "").replace(":", "").replace("-", "").upper()
@@ -3025,6 +3040,7 @@ def run_flow(args, confirm_flash=None):
         "backup": "开启 Telnet + FTP + 备份全部分区（不刷机）",
         "flash":  "开启 Telnet + FTP + 备份 + 刷写 U-Boot（危险！）",
         "stock2ubi": "开启 Telnet + 运行 an758x-stock2ubi + 自动备份校验（网页里刷）",
+        "report": "导出诊断包（设备上的密文/哈希 + 本地密钥表，发给作者分析）",
     }[mode]
     print("=" * 60)
     print(f"  XG-040G-MD 工具 v{VERSION}  ·  运行模式: {mode} — {mode_desc}")
@@ -3034,6 +3050,17 @@ def run_flow(args, confirm_flash=None):
     if args.get("reboot"):
         print("[*] --reboot 模式：仅重启光猫（清掉所有网页会话 / telnet 锁定）")
         reboot_router()
+        return
+
+    # === 0b. report 模式：只导出诊断包，不登录、不改设备 ===
+    #
+    # 必须放在登录之前：这个模式存在的意义正是「telnet 密码解不开、登不上」，
+    # 走的是 fh_tool 的免登录 RPC，全程只读下载。
+    if mode == "report":
+        import fhreport
+        # collect() 自己会打印「诊断包已生成」，这里只补一句去向说明
+        path = fhreport.collect(sys.modules[__name__])
+        print(f"\n把这个文件发给作者即可（内含设备 MAC/SN/密码哈希，勿公开）：\n  {path}")
         return
 
     # === 1. 验证 U-Boot 文件（仅 flash 模式需要） ===

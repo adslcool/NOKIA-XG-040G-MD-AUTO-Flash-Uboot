@@ -49,15 +49,24 @@ tab 各有各的表单、提示和按钮，互不影响，配置也分开存（�
 telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程序按机型
 规则推导，不用你填。
 
+另外有两个**选填**框（`telnet 密码`、`su 密码`），只在自动推导失败时才需要
+填：本工具内置的密钥覆盖不到你这台光猫的固件版本，而你自己用别的工具解出了
+真实密码。填了之后程序优先用它。详见
+[两条兜底](#两条兜底手动填密码--导出诊断包)。
+
 1. **MAC 自动读取**——MAC 输入框旁边有「自动读取」按钮，程序直接问设备
    （`GET http://<ip>:8080/cgi-bin/ajax?ajaxmethod=web_get_brmad`，无需登录）。
    输入框**保留**：换了管理口、页面改版、电脑没接 LAN 口时读不到，
    还可以照光猫背面标签手填。
-2. **操作**——`① 开启 Telnet`、`② 备份并刷 U-Boot（stock2ubi）`、`重启光猫`。
+2. **操作**——`① 开启 Telnet`、`② 备份并刷 U-Boot（stock2ubi）`、
+   `重启光猫`、`导出诊断包`。
    烽火**没有**单独的「备份」按钮，也没有 tcboot 刷机区：备份分区和写
    preloader / U-Boot 都在 stock2ubi 的网页里完成，对本工具来说就是
    「把工具传上去跑起来 + 打开网页」一件事。后续适配 AN7581 家族
    （HG5382A 等）也走这条，因为 `tcboot.bin` 是专门给贝尔移动版做的。
+
+   「导出诊断包」是 telnet 密码解不开时的兜底：把设备上密码相关的文件、
+   密文片段、本地密钥和解密结果打包成 zip 发给作者，全程只读。
 3. **U-Boot 固件下载**——操作区下面直接给了两个发布页链接：
    - [pbs05 / uboot-an758x](https://github.com/pbs05/uboot-an758x/releases)
      —— **HG5585F 用这个**，下 `bl31-u-boot.fip`；
@@ -272,6 +281,7 @@ pip install pyserial              # 只有走 TTL 串口时需要
 | `--mode backup`（默认） | 开启 Telnet+FTP + 备份全部分区 | 否 |
 | `--mode flash` | 开启 Telnet+FTP + 备份 + 刷写 U-Boot | **是，危险** |
 | `--mode stock2ubi` | 上传 an758x-stock2ubi + 自动备份校验 + 打开网页 | 否（刷写在它网页里做） |
+| `--mode report` | 导出诊断包 zip（密码相关文件 + 密文 + 本地密钥表） | 否（只读下载） |
 
 用 `--model` 选机型（默认 `bel`）：
 
@@ -284,7 +294,8 @@ python3 flash.py --model hg5585f  --mode backup   # 烽火 HG5585F CT
 
 - **贝尔 tab**：`① 开启 Telnet`、`② 开启 FTP`、`③ 备份全部分区`、
   `④ 运行 stock2ubi 刷 U-Boot`、`重启光猫`，外加默认锁定的「刷写 U-Boot」；
-- **烽火 tab**：`① 开启 Telnet`、`② 备份并刷 U-Boot（stock2ubi）`、`重启光猫`。
+- **烽火 tab**：`① 开启 Telnet`、`② 备份并刷 U-Boot（stock2ubi）`、`重启光猫`、
+  `导出诊断包`。
 
 **Telnet 和 FTP 是两个独立开关**，各自单独检测端口：
 - 两个都关 → `--mode backup` 会依次自动开启；
@@ -297,6 +308,7 @@ python3 flash.py --mode telnet     # 最安全，只开 telnet
 python3 flash.py --mode backup     # 只备份全部分区
 python3 flash.py --mode flash      # 刷机（会要求输入 YES 二次确认）
 python3 flash.py --mode stock2ubi  # 上传 an758x-stock2ubi 并在光猫后台跑起来
+python3 flash.py --mode report     # 导出诊断包（telnet 密码解不开时发给作者）
 python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / telnet 锁定）
 ```
 
@@ -752,6 +764,58 @@ python3 fhdecrypt.py --value 2506000049ECBE32C8DE760F0E960B0F0A53953F
 
 > 密钥表按**固件版本**索引（目前验证过 `V4.20.M5000`）。换固件后密钥可能不同，
 > 表里没命中时会明确报错而不是给出乱码 —— 猜错比报错更糟。
+
+#### 两条兜底：手动填密码 / 导出诊断包
+
+自动找回也可能失败 —— 新固件换了密钥表，或者装维改密码的方式不在这几条
+路径上。这时候有两个出口，都不用改代码：
+
+**① 手动指定密码（界面「telnet 密码（选填）」「su 密码（选填）」）**
+
+如果你已经用别的工具（论坛脚本、厂商工具、自己逆向）拿到了真实密码，直接填
+进烽火 tab 那两个「选填」框即可。程序会**优先**用它，不再试其他候选：
+
+```
+[手填] telnet 候选: ['MYPWD123', 'FH-nE7jA%5m']
+[手填] su 候选:     ['MYSU456']
+```
+
+这两项存在 `config.ini` 的 `[fh]` 段，永远不会被机型档案覆盖（和贝尔那套
+`[telnet]` 的 `password` 不一样，那个切换机型时会被重写）。留空就是默认行为。
+
+**② 导出诊断包发给作者**
+
+界面「导出诊断包」按钮，或命令行：
+
+```bash
+python3 flash.py --mode report --model hg5585f
+```
+
+它从光猫只读下载密码相关文件、切出密文片段、逐个试本地密钥，把结果打包成
+`fh_report_<时间>.zip`：
+
+| 文件 | 内容 |
+| --- | --- |
+| `README.txt` | 设备身份 + 收集结果 + **已解出的密码相关字段**（直接列在最上面） |
+| `device.json` | 型号 / SN / MAC / 固件版本 / 编译时间 |
+| `attempts.json` | 每个路径的下载结果、每段密文的 offset/hex/解密判定 |
+| `keys.json` | 本工具内置的密钥表（k2 只给前 16 字节） |
+| `env.json` | 工具版本 / Python / 平台 |
+| `files/` | 设备上原样导出的文件（已拆掉外层 tar） |
+
+作者看 `attempts.json` 里的 `verdict` 就能判断属于哪种情况：
+
+- `解密成功` → 密码就在明文里，是工具的候选表该更新；
+- `所有已知密钥都解不出可打印明文` → 固件换了密钥，需要新的 k2/iv2；
+- `容器头不在已知密钥表里` → 换了加密方式或新的容器格式。
+
+实测一台 HG5585F 取到 7/13 个文件、24 段密文全部解开，README 顶部直接给出
+`TelnetPassword = FH-nE7jA%5m`。取不到的（`param.pdt.enc`、`calidata`、
+`/etc/shadow`）是因为 `DownloadFile` 只放行 `/fhconf/` 和 `/fhdata/` 两个
+目录，换固件可能就放行了，所以仍然每次都会试一遍。
+
+> ⚠️ 诊断包里有设备 MAC、PON SN、整机 SN、telnet 密码哈希，可能还有 Wi-Fi
+> 名称/密码。**只发给作者，不要公开贴到论坛或群里。**
 
 ### 提示"获取 root 权限失败"
 备份和刷写都需要 root 权限，非 root 下 busybox 会直接拒绝执行 dd：

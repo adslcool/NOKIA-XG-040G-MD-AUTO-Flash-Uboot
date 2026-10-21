@@ -46,6 +46,14 @@ DEFAULTS = {
         "mac": "",
         "super_username": "telecomadmin",
         "super_password": "nE7jA%5m",
+        # 手动指定的 telnet / su 密码。留空 = 用程序推导的默认值。
+        #
+        # 什么时候需要填：本工具内置的 AES 密钥只覆盖已知固件版本。如果某台
+        # 光猫换了密钥表，本地解密就会失败 —— 但用户可能用别的工具（论坛脚本、
+        # 厂商工具、自己逆向）解出了真实密码，那就填在这里，程序会**优先**用它。
+        # 这两项永远不会被机型档案覆盖，填了就是最高优先级。
+        "telnet_password": "",
+        "su_password": "",
     },
     "serial": {
         # TTL 串口（拆机接线）：走这条路时不需要 Telnet / FTP / 超级密码，
@@ -149,6 +157,10 @@ def apply_to_flash(cfg, flash):
     root_pwd = cfg.get("telnet", "root_password").strip()
     # 留空即沿用 telnet 密码（本机型实测 su user_ftp 的密码就是 telnet 密码）
     flash.ROOT_PASSWORD = root_pwd if root_pwd else flash.PASSWORD
+    # 贝尔 tab 没有「手动指定密码」框，这里清空，避免烽火 tab 填的值串过来
+    # （两个 tab 共用同一个 flash 模块，切 tab 后 _load_flash 会重新走这里）
+    flash.MANUAL_TELNET_PASSWORD = ""
+    flash.MANUAL_SU_PASSWORD = ""
 
     flash.SUPER_USER = cfg.get("super", "username")
     flash.SUPER_PASSWORD = cfg.get("super", "password")
@@ -240,6 +252,10 @@ def apply_fh_to_flash(cfg, flash):
     flash.TELNET_PASSWORD_TRY_MAC_SUFFIX = m.telnet_password_try_mac_suffix
     flash.MODEL_SU_PASSWORD = m.su_password
     flash.MODEL_SU_PASSWORD_PREFIX = m.su_password_prefix
+    # 用户手填的密码：优先级高于机型档案推导值（见 flash._password_candidates）。
+    # 留空就是空串，不会参与候选去重，所以不影响默认行为。
+    flash.MANUAL_TELNET_PASSWORD = cfg.get("fh", "telnet_password", fallback="").strip()
+    flash.MANUAL_SU_PASSWORD = cfg.get("fh", "su_password", fallback="").strip()
     # telnet 密码：固定值 FH-nE7jA%5m（固件里解出来的），用户在 [fh] 里
     # 没有单独的 telnet 密码键 —— 这是刻意的，避免用户填错反而登录不上。
     flash.USERNAME = m.telnet_user
@@ -267,6 +283,8 @@ def fh_defaults(model=None):
         "mac": "",
         "super_username": m.super_user,
         "super_password": m.super_password,
+        "telnet_password": "",
+        "su_password": "",
     }
 
 
