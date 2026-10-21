@@ -1314,7 +1314,11 @@ def self_test():
             "2506000049ECBE32C8DE760F0E960B0F0A53953F")[0]
         if probe != "FH-nE7jA%5m":
             raise RuntimeError(f"固定向量解出来是 {probe!r}，应为 FH-nE7jA%5m")
-        print("  [✓] fhdecrypt（telnet 密码找回可用，固定向量校验通过）")
+        # md5-crypt 也验一次：登录前靠它把候选密码和设备上的哈希比对，
+        # 算错了会导致「明明密码对却一直说不匹配」，比解不出更隐蔽。
+        if fhdecrypt.md5_crypt("1234", "") != "$1$$iC.dUsGpxNNJGeOm1dFio/":
+            raise RuntimeError("md5-crypt 实现自检失败")
+        print("  [✓] fhdecrypt（telnet 密码找回可用，AES + md5-crypt 校验通过）")
     except Exception as e:  # noqa: BLE001
         problems.append(f"缺模块 fhdecrypt: {type(e).__name__}: {e}")
         print(f"  [✗] fhdecrypt — {e}")

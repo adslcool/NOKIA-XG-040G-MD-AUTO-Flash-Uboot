@@ -1336,6 +1336,104 @@ def _should_reboot(reason, rebooted, ask=True):
     return True
 
 
+def _probe_password_by_hash(quiet=False):
+    """登录**之前**先用免登录通道核对密码，避免白烧认证机会。
+
+    这是用户提的那条路子：设备上有 `/var/tel_passwd`（`用户名:哈希:...`），
+    而 fh_tool 的 `DownloadFile` 不需要登录就能把它导出来。拿回本地后：
+
+      1. 用候选密码逐个算 md5-crypt 哈希去比对 —— 对上就说明密码**肯定**对，
+         直接拿它登录，一次认证机会都不浪费；
+      2. 全都对不上，说明装维改过密码，这时才去解 `param.pdt.enc` 拿明文。
+
+    对比「在 telnet 会话里一个个试密码」：烽火连错 3 次就锁 300 秒，而本地
+    算哈希是免费的。所以这一步应该在**任何 telnet 连接建立之前**做。
+
+    返回 {"username":…, "password":…, "source":…} 或 None。
+    """
+    if MODEL_FAMILY != "fh":
+        return None
+    try:
+        import fhtool
+    except Exception as e:  # noqa: BLE001
+        if not quiet:
+            print(f"[!] 无法加载 fhtool（{type(e).__name__}: {e}），跳过密码核对")
+        return None
+    if not fhtool.available():
+        if not quiet:
+            print("[!] 没装 fh_tool-cli，无法用免登录通道核对密码")
+        return None
+
+    ensure_model_mac()
+    mac = MODEL_MAC
+    if not mac:
+        if not quiet:
+            print("[!] 读不到光猫 MAC，免登录通道用不了（密钥由 MAC 派生）")
+        return None
+
+    try:
+        import fhdecrypt
+    except Exception as e:  # noqa: BLE001
+        if not quiet:
+            print(f"[!] 无法加载 fhdecrypt（{type(e).__name__}: {e}），跳过密码核对")
+        return None
+
+    if not quiet:
+        print()
+        print("[*] 先用免登录通道核对 telnet 密码（不消耗认证机会）...")
+    client = fhtool.FhClient(ROUTER_IP, mac, port=WEB_PORT)
+
+    # ---- 步骤 1：取密码文件，本地比哈希 ----
+    tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_recover")
+    hashes = {}
+    for remote in ("/var/tel_passwd", "/var/telWan_passwd"):
+        local = os.path.join(tmpdir, os.path.basename(remote))
+        try:
+            got = client.download_file(remote, local, timeout=60.0)
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                print(f"[*] 取 {remote} 失败（{type(e).__name__}）")
+            continue
+        if (got.get("bytes") or 0) < 8:
+            continue
+        try:
+            parsed = fhdecrypt.parse_passwd_file(open(local, "rb").read())
+        except Exception:  # noqa: BLE001
+            continue
+        if parsed:
+            if not quiet:
+                print(f"[✓] 已取回 {remote}：{', '.join(parsed)}")
+            hashes.update(parsed)
+        if hashes:
+            break  # tel_passwd 与 telWan_passwd 内容相同，取到一个就够
+
+    if hashes:
+        cands = _password_candidates()
+        # telnet 账号在密码文件里通常就叫 telnetadmin；不认识的账号也一起试，
+        # 反正本地算哈希不要钱。
+        preferred = [u for u in hashes if u in ("telnetadmin", MODEL_TELNET_USER)]
+        order = preferred + [u for u in hashes if u not in preferred]
+        for user in order:
+            pwd, why = fhdecrypt.match_password_hash(cands, hashes[user])
+            if pwd:
+                if not quiet:
+                    print(f"[✓] 密码核对通过（账号 {user}）：{why}")
+                plain = not hashes[user].startswith("$")
+                return {
+                    "username": "" if user in ("root",) else user,
+                    "password": pwd,
+                    "source": ("设备密码文件（明文）" if plain
+                               else "本地比对设备密码文件里的哈希"),
+                }
+            if not quiet:
+                print(f"[*] 账号 {user}：{why}")
+    elif not quiet:
+        print("[*] 没取到密码文件，直接走解密兜底")
+
+    # ---- 步骤 2：解固件配置拿明文 ----
+    return _try_recover_telnet_password(quiet=quiet)
+
+
 def _try_recover_telnet_password(quiet=False):
     """telnet 密码被拒时，用**免登录**通道把真实密码找回来。
 
@@ -1492,7 +1590,19 @@ def telnet_login(reenter_only=False, _su_retried=False):
     if reenter_only:
         candidates = candidates[:1]
 
-    # 2) 逐个尝试登录；失败则按策略自动重启光猫后重试
+    # 2) 登录前先用免登录通道核对密码（只对烽火，贝尔没有这个接口）。
+    #    为什么放在**连接 telnet 之前**：烽火连错 3 次就锁 300 秒，而本地
+    #    比对哈希是免费的。密码对不上时还能直接从固件配置里解出明文，
+    #    等于一次认证机会都不用花。
+    if MODEL_FAMILY == "fh" and not reenter_only and not _RECOVERED_PASSWORD:
+        got = _probe_password_by_hash()
+        if got and got.get("password"):
+            if got.get("username") and got["username"] not in candidates:
+                candidates.insert(0, got["username"])
+            _prepend_password_candidate(got["password"])
+            print(f"[✓] 已确认 telnet 密码（来源：{got['source']}），直接登录 ...")
+
+    # 3) 逐个尝试登录；失败则按策略自动重启光猫后重试
     rebooted = 0
     recovered = False
     while True:
@@ -1535,7 +1645,7 @@ def telnet_login(reenter_only=False, _su_retried=False):
             sys.exit(1)
         print("[✓] 光猫已重启，重新尝试 telnet 登录 ...")
 
-    # 3) su 提权
+    # 4) su 提权
     if who == "root":
         print("[✓] 登录后已是 root，跳过 su")
         return tn

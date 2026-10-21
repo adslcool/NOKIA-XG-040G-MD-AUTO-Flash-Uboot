@@ -47,6 +47,7 @@
 （猜错只会给出乱码，比报错更糟）。
 """
 
+import hashlib
 import re
 import struct
 
@@ -59,6 +60,10 @@ __all__ = [
     "find_param_pdt_enc",
     "extract_telnet_info",
     "describe_keys",
+    "md5_crypt",
+    "verify_md5_crypt",
+    "parse_passwd_file",
+    "match_password_hash",
 ]
 
 
@@ -473,6 +478,149 @@ def _from_uci_text(data, firmware_version=""):
         else:
             out[name] = val
     return out
+
+
+# ---------------------------------------------------------------------------
+# md5-crypt（$1$）—— 用来在**本地**核对 telnet 密码，不碰 telnet
+# ---------------------------------------------------------------------------
+# 为什么需要：设备上的 `/var/tel_passwd` 是 `用户名:哈希:...` 格式，哈希由
+# libcrypt 的 `crypt()` 生成。把它免登录取回来，就能在本地把候选密码算成哈希
+# 逐个比对 —— 对上了说明密码肯定正确，一次 telnet 认证机会都不浪费；
+# 全对不上才去解固件里的密码。
+#
+# Python 3.13 起标准库移除了 `crypt` 模块，所以这里自带一份 md5-crypt 实现
+# （算法出自 FreeBSD crypt-md5.c，公开规范，不依赖任何第三方包）。
+_MD5_CRYPT_MAGIC = b"$1$"
+_MD5_CRYPT_ALPHABET = (
+    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _to64(value, length):
+    """md5-crypt 的 64 进制编码（低位先出，字符表见上）。"""
+    out = []
+    for _ in range(length):
+        out.append(_MD5_CRYPT_ALPHABET[value & 0x3F])
+        value >>= 6
+    return "".join(out)
+
+
+def md5_crypt(password, salt):
+    """按 $1$（md5-crypt）算法算哈希，返回完整的 `$1$salt$hash`。
+
+    password / salt 都可以是 str 或 bytes。salt 只用前 8 个字符。
+    """
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    if isinstance(salt, str):
+        salt = salt.encode("utf-8")
+    salt = salt[:8]
+
+    # 第一步：ctx = MD5(pw + magic + salt + 若干份 MD5(pw + salt + pw))
+    mixin = hashlib.md5(password + salt + password).digest()
+    ctx = hashlib.md5(password + _MD5_CRYPT_MAGIC + salt)
+    pl = len(password)
+    while pl > 0:
+        ctx.update(mixin[: min(pl, 16)])
+        pl -= 16
+    # 「奇怪的一步」：按密码长度的二进制位追加 0x00 或密码首字节
+    i = len(password)
+    while i:
+        ctx.update(b"\x00" if (i & 1) else password[:1])
+        i >>= 1
+    final = ctx.digest()
+
+    # 第二步：跑 1000 轮加强
+    for i in range(1000):
+        ctx1 = hashlib.md5()
+        if i & 1:
+            ctx1.update(password)
+        else:
+            ctx1.update(final)
+        if i % 3:
+            ctx1.update(salt)
+        if i % 7:
+            ctx1.update(password)
+        if i & 1:
+            ctx1.update(final)
+        else:
+            ctx1.update(password)
+        final = ctx1.digest()
+
+    # 第三步：按固定顺序把 16 字节重排成 22 个字符
+    encoded = (
+        _to64((final[0] << 16) | (final[6] << 8) | final[12], 4)
+        + _to64((final[1] << 16) | (final[7] << 8) | final[13], 4)
+        + _to64((final[2] << 16) | (final[8] << 8) | final[14], 4)
+        + _to64((final[3] << 16) | (final[9] << 8) | final[15], 4)
+        + _to64((final[4] << 16) | (final[10] << 8) | final[5], 4)
+        + _to64(final[11], 2)
+    )
+    return "$1$%s$%s" % (salt.decode("latin1"), encoded)
+
+
+def verify_md5_crypt(password, hashed):
+    """候选密码与 `$1$salt$hash` 是否匹配。hashed 不是 md5-crypt 就返回 False。"""
+    if not hashed or not isinstance(hashed, str):
+        return False
+    if not hashed.startswith("$1$"):
+        return False
+    parts = hashed.split("$")
+    # ["", "1", salt, hash]
+    if len(parts) < 4:
+        return False
+    salt = parts[2]
+    try:
+        return md5_crypt(password, salt) == hashed
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def parse_passwd_file(data):
+    """解析 `用户名:哈希:uid:gid:备注:家目录:shell` 格式的 passwd 文件。
+
+    设备上 `/var/tel_passwd`、`/var/telWan_passwd`、`/var/telsu` 都是这个格式，
+    由 telnetd / protocolmgr 在启动时按配置生成。返回 {用户名: 哈希}，
+    哈希不是 `$` 开头的（明文或 `x`）也会原样带出，交给调用方判断。
+    """
+    if isinstance(data, bytes):
+        text = data.decode("utf-8", "replace")
+    else:
+        text = data or ""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        user = parts[0].strip()
+        hashed = parts[1].strip()
+        if user:
+            out[user] = hashed
+    return out
+
+
+def match_password_hash(candidates, hashed):
+    """在候选密码里找哈希对得上的那个，返回 (密码, 说明) 或 (None, 说明)。
+
+    这一步纯本地计算，**不消耗 telnet 认证次数** —— 比在 telnet 会话里
+    一个个试要安全得多（烽火连续错 3 次就锁）。
+    """
+    if not hashed:
+        return None, "没有可用的哈希"
+    if not hashed.startswith("$1$"):
+        # $5$/$6$（sha256/sha512-crypt）或明文，本模块不算
+        if hashed.startswith("$"):
+            return None, f"哈希类型不是 md5-crypt（{hashed.split('$')[1]}），无法本地比对"
+        if hashed and hashed not in ("x", "*", "!"):
+            return hashed, "密码文件里就是明文"
+        return None, "密码文件里没有可用哈希"
+    for cand in candidates:
+        if cand and verify_md5_crypt(cand, hashed):
+            return cand, "候选密码与设备上的哈希一致"
+    return None, f"试了 {len(candidates)} 个候选密码，都与设备上的哈希对不上"
 
 
 def _pick_key(firmware_version):
