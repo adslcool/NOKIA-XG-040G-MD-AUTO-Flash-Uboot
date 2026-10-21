@@ -1222,6 +1222,23 @@ class App:
         self._start_worker(flash.run_flow, args)
 
 
+def _missing_optional(problems, what, feature, howto):
+    """报告一个「源码可选、打包必需」的依赖缺失。
+
+    源码直接跑时缺 pyserial / fh_tool_cli 是正常的（按机型、按接入方式装），
+    所以只打 [!] 提示；但打成 exe 之后用户没法自己 pip install，缺了就是
+    功能残缺，必须算失败 —— 否则 CI 会带着坏包一路发到 Release
+    （实测踩过：CI 漏装 fh_tool-cli，产物比本地小 4.5MB，烽火功能是坏的）。
+    """
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        problems.append(f"打包缺 {what} —— {feature}功能不可用（{howto}）")
+        print(f"  [✗] {what} —— {feature}功能不可用，打包时必须带上（{howto}）")
+    else:
+        print(f"  [!] {what} 不可用 —— {feature}功能不可用，"
+              f"源码运行时可忽略（{howto}）")
+
+
 def self_test():
     """检查运行环境：flash.py 能否加载、依赖是否齐全。
 
@@ -1256,29 +1273,29 @@ def self_test():
             problems.append(f"缺模块 {m}: {type(e).__name__}: {e}")
             print(f"  [✗] {m} — {e}")
 
-    # 2a. TTL 串口（按需加载；没装 pyserial 只影响 TTL，所以只提示不算失败）
+    # 2a. TTL 串口。源码运行时是「可选依赖」；但**打包后的 exe** 必须自带，
+    # 否则用户拿到的是个功能残缺的包 —— 所以冻结环境下缺了直接判失败。
     try:
         import serial_shell
         if serial_shell.available():
             print("  [✓] pyserial（TTL 串口可用）")
         else:
-            print("  [!] 没装 pyserial —— TTL 串口功能不可用，"
-                  "telnet 路线不受影响（pip install pyserial）")
+            _missing_optional(problems, "pyserial", "TTL 串口", "pip install pyserial")
     except Exception as e:  # noqa: BLE001
-        print(f"  [!] serial_shell 不可用（{type(e).__name__}: {e}）"
-              " —— 只影响 TTL")
+        _missing_optional(problems, f"serial_shell（{type(e).__name__}: {e}）",
+                          "TTL 串口", "pip install pyserial")
 
-    # 2b. 烽火机型后端（按需加载；缺了只影响烽火，所以只提示不算失败）
+    # 2b. 烽火机型后端。同理：打包时必须带上，否则烽火 tab 是坏的。
     try:
         import fhtool
         if fhtool.available():
             print("  [✓] fh_tool_cli（烽火机型可用）")
         else:
-            print("  [!] fh_tool_cli 不可用 —— 只有烽火机型需要，"
-                  "贝尔机型不受影响")
+            _missing_optional(problems, "fh_tool_cli", "烽火机型",
+                              "pip install fh_tool-cli")
     except Exception as e:  # noqa: BLE001
-        print(f"  [!] fhtool 后端不可用（{type(e).__name__}: {e}）"
-              " —— 只有烽火机型需要")
+        _missing_optional(problems, f"fhtool（{type(e).__name__}: {e}）",
+                          "烽火机型", "pip install fh_tool-cli")
 
     # 2b-2. 烽火 factory 镜像生成（备份后自动调用，缺了烽火刷机就少一步）
     try:

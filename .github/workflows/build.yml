@@ -59,7 +59,12 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install telnetlib3 pyinstaller
+          # 必须装齐：requirements.txt 里那几个（fh_tool-cli、pyserial）虽然
+          # 在源码里是「可选依赖」，但**打包**时不能省 —— 少了它们，
+          # PyInstaller 就找不到对应模块，产物里就没有烽火支持和 TTL 支持。
+          # 自检对缺失只打 [!] 警告、不算失败，所以这个坑不会自己暴露
+          # （实测踩过：CI 的 exe 比本地小 4.5MB，烽火功能是坏的）。
+          python -m pip install telnetlib3 pyinstaller -r requirements.txt
 
       - name: 语法检查
         run: python -m py_compile flash.py gui.py config.py version.py changelog.py package_release.py
@@ -82,8 +87,10 @@ jobs:
           SIZE="$(wc -c < "$EXE" | tr -d ' ')"
           echo "产物: $EXE"
           echo "大小: $SIZE 字节"
-          # 太小说明 PyInstaller 没把东西打进去（正常 13~15MB）
-          if [ "$SIZE" -lt 5000000 ]; then
+          # 太小说明 PyInstaller 没把东西打进去。带 fh_tool_cli + pyserial
+          # 后正常是 19~21MB；低于 18MB 基本就是漏装了 requirements.txt
+          # （踩过：只装 telnetlib3+pyinstaller 时产物 15.9MB，烽火功能是坏的）。
+          if [ "$SIZE" -lt 18000000 ]; then
             echo "::error::exe 只有 $SIZE 字节，明显不完整"
             exit 1
           fi
@@ -112,7 +119,13 @@ jobs:
           echo "------------------------"
 
           if ! grep -q "自检通过" selftest.log; then
-            echo "::error::exe 自检未通过（多半是漏了 hiddenimports）"
+            echo "::error::exe 自检未通过（多半是漏了 hiddenimports 或 requirements.txt）"
+            exit 1
+          fi
+          # 自检对「打包后仍缺可选依赖」会打 [✗]，这里再兜一道，
+          # 防止将来又悄悄发出一个功能残缺的包。
+          if grep -q "\[✗\]" selftest.log; then
+            echo "::error::自检里有 [✗] 项，产物不完整"
             exit 1
           fi
           grep -q "v${{ steps.ver.outputs.version }}" selftest.log \
