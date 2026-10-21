@@ -704,13 +704,28 @@ python3 flash.py --reboot
 
 1. **先取设备上的密码文件**：`DownloadFile` 把 `/var/tel_passwd` 拉回本地。
    这个文件是 `用户名:哈希:...` 格式（哈希由 libc 的 `crypt()` 生成，
-   实测是 md5-crypt `$1$...`）。拿候选密码在**本地**算哈希去比对 ——
-   对上了说明密码肯定正确，一次 telnet 认证机会都不浪费。
+   实测 HG5585F 是 sha256-crypt `$5$fh$...`，贝尔/老固件可能是 md5-crypt
+   `$1$...`）。拿候选密码在**本地**算哈希去比对 —— 对上了说明密码肯定正确，
+   一次 telnet 认证机会都不浪费。
    （烽火连错 3 次就锁 300 秒，所以这一步必须发生在任何 telnet 连接之前。）
 2. **对不上再解密**：说明装维改过密码。用 `DownloadFile` 把
    `/fhrom/fhconf/param.pdt.enc` 拉回来，用固件里的 AES 工作密钥解出明文
-   （`fhdecrypt.py`）。
+   （`fhdecrypt.py`）。老固件没有这个文件时，会退到
+   `/fhdata/pre_usrconfig_conf`（省份预置包，里面也是同一套加密的
+   `option TelnetPassword '2506...'`）。
 3. `GetTelnetInfo` 若存在也会先试一次（设备直接吐账号密码，最省事）。
+
+**候选密码分两类，只有第一类会在线试：**
+
+| 用途 | 内容 | 是否连 telnet |
+| --- | --- | --- |
+| 在线试 | 机型档案固定值 `FH-nE7jA%5m` + 流传的 MAC 后缀变体（最多 3 个） | 是，3 次就锁 |
+| 仅本地比对 | `admin/Fh@+MAC后6位`、`root/hg2x0`、`admin/admin`、`telecom/nE7jA%5m`、`admin/abcd` 等弱口令 | **否**，只在本地算哈希 |
+
+第二类来自论坛与社区汇总（HG5585F / HG5140A / HG6145D 等型号），绝大多数机器上
+都是错的。有了 `/var/tel_passwd` 里的哈希，这些候选在本地算哈希是免费的，命中
+才去登录；没命中就完全不会碰 telnet。如果把十几组弱口令直接拿去在线试，必然把
+设备锁死 300 秒。
 
 取回的密码只用于**本次运行**，不会写进 `config.ini`。整个过程不消耗 telnet
 认证次数。

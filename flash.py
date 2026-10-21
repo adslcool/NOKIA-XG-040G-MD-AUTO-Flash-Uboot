@@ -133,6 +133,27 @@ SERIAL_PASSWORD = ""               # 串口 root 密码；留空则直接回车�
 AUTO_DETECT_USERNAME = True
 USERNAME = "user"                # 手动指定时用这个（XG-040G-MD 移动版实测为 user）
 USERNAME_CANDIDATES = ["user", "useradmin"]  # 自动探测失败时的候选顺序（不要加 admin：错的候选会白耗一次认证机会）
+
+# 烽火各型号流传的「弱口令」组合（账号, 密码）。
+#
+# ⚠️ 只用于**本地比对哈希**，绝不拿去在线逐个试 —— 烽火连错 3 次锁 300 秒，
+# 十几组组合够把设备锁到重启。有了 `_probe_password_by_hash()` 这条免登录通道
+# 之后，这些候选在本地算哈希是免费的，命中才登录，一次认证机会都不浪费。
+# 来源：HG5585F/HG5140A/HG6145D 论坛记录与社区汇总（见 README「密码候选」）。
+WEAK_CREDENTIALS = [
+    ("admin",        "Fh@{mac6}"),        # HG5585F 论坛记录（提权前缀 + MAC 后 6 位）
+    ("root",         "Fh@{mac6}"),        # 烽火其他型号
+    ("telnetadmin",  "FH-nE7jA%5m{mac6}"),  # 烽火电信版记录（带 MAC 后缀）
+    ("telnetadmin",  "FH-nE7jA%5m"),      # 烽火电信版记录（固定值）
+    ("telecom",      "nE7jA%5m"),         # 烽火电信版
+    ("admin",        "hg2x0"),            # 烽火旧版通用记录
+    ("root",         "hg2x0"),            # 烽火旧版通用记录
+    ("admin",        "admin"),            # 通用默认组合
+    ("telecom",      "telecom"),          # 旧版记录
+    ("admin",        "abcd"),             # 社区汇总
+    ("root",         "abcd"),             # 社区汇总
+]
+# 上面的 `{mac6}` 会被替换成 MAC 后 6 位（大写）。大小写两种都试（本地比对免费）。
 PASSWORD = "j3ba73@8"            # telnet 登录密码（光猫底部铭牌上的那一个）
 # su 提权用的账号。原脚本写的是 useradmin_ftp，但 XG-040G-MD 当前固件的
 # /etc/passwd 里根本没有这个账号（只有 root / user-common / osgi_admin / user-telnet），
@@ -1260,37 +1281,80 @@ def _telnet_login_once(candidates, retries=6, backoff=30):
             time.sleep(3)
             continue
 
-        # 密码逐个试。注意每个密码都在**同一个会话**里试（服务器重新要密码
-        # 时会出现新的 Password: 提示），不用重新连接，省一次握手。
+        # 密码逐个试。注意每个密码都在**同一个会话**里试，不用重新连接，
+        # 省一次握手。
+        #
+        # ⚠️ 两个坑，都踩过：
+        # ① 必须**先判断登录结果，再决定要不要发命令**。早期实现发完密码就
+        #    直接调 confirm_identity() 发 `id\n`，而密码错时服务器还在等密码
+        #    —— 于是 `id` 被当成**下一个密码**又提交了一次，每试一个密码烧掉
+        #    两次认证机会，3 次就锁，比预想快一倍。
+        # ② 这台设备（HG5585F，busybox login）密码错后**退回 `Login:` 提示**，
+        #    不是重新问 `Password:`。所以想继续试下一个密码，必须**重新发一次
+        #    账号**。早期实现看到 `Login:` 就 break，后面的正确密码根本没提交，
+        #    表现为「密码明明对却登录失败」。
+        #
+        # 状态机：at_prompt=True 表示服务器当前停在 Password:，可以直接发密码；
+        # 否则（停在 Login:）要先重发账号。
+        at_prompt = True   # 刚发完账号，服务器回了 Password:
+        tried = 0
         for pi, pwd in enumerate(passwords):
             if pi > 0:
-                # 上一个密码被拒，服务器又给了 Password: 提示，直接发下一个
                 print(f"[*] 换一个密码重试（第 {pi + 1}/{len(passwords)} 个）...")
+            if not at_prompt:
+                # 上一轮失败后退回了 Login:，重新提交账号才能继续
+                tn.write(user.encode() + b"\n")
+                h0, t0 = expect_any(tn, ["Password:", "forbidden", "closed"],
+                                    timeout=10)
+                if "forbidden" in (t0 or ""):
+                    print("[!] 设备提示认证被禁止（已触发连续失败锁定）。")
+                    try:
+                        tn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return None, None, "lockout"
+                if h0 != "Password:":
+                    print(f"[!] 重新提交账号后没等到密码提示（{h0 or '超时'}）")
+                    break
+                at_prompt = True
+
             tn.write(pwd.encode() + b"\n")
-            # 不用提示符判定登录成功 —— 这台设备的提示符形态不稳定（可能是
-            # '$' 也可能是 '$ '），telnetlib3 对单字节模式还会返回空 span。
-            # 直接发命令看身份回显，是唯一可靠的做法。
-            who = confirm_identity(tn, timeout=15)
-            if who is not None:
-                print(f"[✓] 登录成功（账号 {user}，身份 {who}）")
-                return tn, who, "ok"
-            if pi == len(passwords) - 1:
-                break
-            # 等服务器重新给出 Password: 提示，再发下一个密码
-            h2, t2 = expect_any(tn, ["Password:", "Login:", "forbidden", "closed"],
-                                timeout=10)
-            if "forbidden" in (t2 or ""):
+            tried += 1
+            # 先看服务器给什么：登录成功会出 shell 提示符；失败会回
+            # Login incorrect / 退回 Login:，或者回 forbidden。
+            h, t = expect_any(
+                tn,
+                ["#", "$", "Password:", "Login incorrect", "Login:", "forbidden"],
+                timeout=15,
+            )
+            if "forbidden" in (t or ""):
                 print("[!] 设备提示认证被禁止（已触发连续失败锁定）。")
                 try:
                     tn.close()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
                 return None, None, "lockout"
-            if h2 != "Password:":
-                # 没有重新要密码（可能直接断开了），这一轮到此为止
-                break
+            if h in ("#", "$"):
+                # 出了提示符才算登录成功，这时才敢发命令确认身份
+                who = confirm_identity(tn, timeout=15)
+                if who is not None:
+                    print(f"[✓] 登录成功（账号 {user}，身份 {who}）")
+                    return tn, who, "ok"
+                # 有提示符但认不出身份：可能是受限 shell，密码已经对了，
+                # 继续试下一个密码也没意义，直接当成功处理。
+                print("[*] 已进入 shell，但认不出身份（受限 shell），按普通用户继续")
+                return tn, "user", "ok"
+            if h == "Password:":
+                at_prompt = True     # 有的固件直接重新问密码，不用重发账号
+                continue
+            if h in ("Login incorrect", "Login:"):
+                at_prompt = False    # 退回账号提示，下一轮要重发账号
+                continue
+            # 超时/断开：不知道状态，别继续瞎发，交给上层重启
+            print(f"[!] 密码 {pi + 1} 后没等到明确响应（{h or '超时'}）")
+            break
 
-        print(f"[!] 账号 {user} 登录失败：{len(passwords)} 个密码都不对")
+        print(f"[!] 账号 {user} 登录失败：试了 {tried} 个密码")
         try:
             tn.close()
         except Exception:
@@ -1334,6 +1398,29 @@ def _should_reboot(reason, rebooted, ask=True):
         except EOFError:
             return False
     return True
+
+
+def _weak_credentials():
+    """把 WEAK_CREDENTIALS 里的 `{mac6}` 占位符展开，返回 [(账号, 密码), …]。
+
+    为什么只给本地比对用：这些组合来自论坛/社区汇总，绝大多数机器上都是错的。
+    烽火连错 3 次锁 300 秒，十几组在线试一遍必然把设备锁死。而免登录通道能
+    读到 `/var/tel_passwd` 里的哈希，本地算哈希是免费的 —— 命中才去登录。
+    """
+    mac6 = (MODEL_MAC or "").replace(":", "").replace("-", "").upper()
+    mac6 = mac6[-6:] if len(mac6) >= 6 else ""
+    out = []
+    for user, pwd in WEAK_CREDENTIALS:
+        if not user or not pwd:
+            continue
+        for variant in (pwd, pwd.lower()):
+            p = variant.replace("{mac6}", mac6)
+            if "{mac6}" in variant and not mac6:
+                continue  # 没有 MAC 时这类候选算不出来，跳过
+            pair = (user, p)
+            if pair not in out:  # 全小写的条目会产生重复，去重
+                out.append(pair)
+    return out
 
 
 def _probe_password_by_hash(quiet=False):
@@ -1409,12 +1496,21 @@ def _probe_password_by_hash(quiet=False):
 
     if hashes:
         cands = _password_candidates()
-        # telnet 账号在密码文件里通常就叫 telnetadmin；不认识的账号也一起试，
-        # 反正本地算哈希不要钱。
+        # 先把流传的弱口令组合按「账号 → 密码」拆开：密码文件里通常只有
+        # telnetadmin 一条，但弱口令表里同一个账号可能有多组密码，而且不同
+        # 账号的哈希不同 —— 必须按账号分别比对，不能混成一锅。
+        weak = _weak_credentials()
+        by_user = {}
+        for u, p in weak:
+            by_user.setdefault(u, []).append(p)
+
+        # 优先比对的账号顺序：密码文件里出现的、弱口令表里有的、机型档案的
         preferred = [u for u in hashes if u in ("telnetadmin", MODEL_TELNET_USER)]
         order = preferred + [u for u in hashes if u not in preferred]
         for user in order:
-            pwd, why = fhdecrypt.match_password_hash(cands, hashes[user])
+            # 这个账号的候选 = 通用候选 + 弱口令表里该账号专属的密码
+            user_cands = list(cands) + by_user.get(user, [])
+            pwd, why = fhdecrypt.match_password_hash(user_cands, hashes[user])
             if pwd:
                 if not quiet:
                     print(f"[✓] 密码核对通过（账号 {user}）：{why}")
@@ -1541,8 +1637,15 @@ def _try_recover_telnet_password(quiet=False):
         if pwd:
             if not quiet:
                 print(f"[✓] 从 {remote} 解出了 telnet 密码")
+            # 省份预置包（pre_usrconfig_conf）里只有 TelnetPassword，
+            # 没有 TelnetUserName —— 此时退回机型档案的账号，别返回空串
+            # 让上层拿不到账号（早期 bug：返回 username="" 时上层会跳过
+            # 插入候选账号，结果用贝尔的 user 去登录烽火，必然失败）。
+            uname = (found.get("TelnetUserName") or "").strip()
+            if not uname:
+                uname = MODEL_TELNET_USER or ""
             return {
-                "username": (found.get("TelnetUserName") or "").strip(),
+                "username": "" if uname in ("root",) else uname,
                 "password": pwd,
                 "source": f"解密 {os.path.basename(remote)}",
             }

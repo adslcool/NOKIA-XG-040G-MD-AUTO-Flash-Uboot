@@ -53,6 +53,8 @@ import struct
 
 __all__ = [
     "DecryptError",
+    "CIPHER_KEYS",
+    "ALL_MAGICS",
     "FIRMWARE_KEYS",
     "decrypt_value",
     "decrypt_value_auto",
@@ -62,6 +64,9 @@ __all__ = [
     "describe_keys",
     "md5_crypt",
     "verify_md5_crypt",
+    "sha256_crypt",
+    "verify_sha256_crypt",
+    "verify_password_hash",
     "parse_passwd_file",
     "match_password_hash",
 ]
@@ -74,27 +79,45 @@ class DecryptError(Exception):
 # ---------------------------------------------------------------------------
 # 密钥表
 # ---------------------------------------------------------------------------
-# 每项: (固件版本匹配正则, k2_hex, iv2_hex, 说明)
-# 匹配用 re.search，所以写版本号的一部分就行。
-FIRMWARE_KEYS = [
-    (
-        r"V4\.20\.M5000",
+# 密钥按**容器头**索引，不是按固件版本。
+#
+# 早先我按固件版本索引，结果在另一台机器上翻车：同一份固件、同一份 calidata，
+# 有的省份预置包用的是 `2506` 容器，有的用的是 `2502` 容器 —— 两者用**不同的
+# 工作密钥**，但都是 AES-256-CBC + PKCS#7。所以版本号根本不是区分依据，
+# 容器头那 4 个字节才是。
+#
+# 这两把密钥都不在 libfhcrypto_new.so 里（搜遍整个 .so 没有），也不是从
+# calidata 明文直接推导出来的 —— 它们是运行时由 `ks_wk_pdt_get_by_id`
+# 拿静态 blob 经 AES 解出来的。所以只能把结果硬编码在这里，每遇到一个新
+# 容器头就往表里加一条。
+#
+# 怎么补一条新的：用 qemu 跑固件的 `lib/libfhcfg.so` 解密入口，配合
+# LD_PRELOAD 拦 `wolfSSL_EVP_CipherInit_ex`，能直接抓到 key(32)/iv(16)。
+CIPHER_KEYS = {
+    # 浙江/安徽预置包、HG5585F 两台真机的 param.pdt.enc 都是这一套
+    b"\x25\x06\x00\x00": (
         "d11683d02a88b86c6ce50e8514fffeefc2e4b339b40ac7de12945fe1fa79720a",
         "22f941441cbff9ed83637e8125c12920",
-        "HG5585F 电信版 V4.20.M5000（实测：浙江/安徽预置包 + 两台真机）",
+        "2506",
     ),
-    (
-        # 兜底：目前验证过的烽火 AN7581 固件都用同一套。放最后，版本没命中时
-        # 仍然尝试一次 —— 解出来是 XML 才算成功，解错会自然失败。
-        r".*",
-        "d11683d02a88b86c6ce50e8514fffeefc2e4b339b40ac7de12945fe1fa79720a",
-        "22f941441cbff9ed83637e8125c12920",
-        "通用兜底（AN7581 家族目前共用的固件密钥）",
+    # 这台机器（MAC 70:D5:1E:04:6C:EC）的 pre_usrconfig_conf 用的是这一套
+    b"\x25\x02\x00\x00": (
+        "818ae275b20863ce83af0cc0fec38c71456d6ecc215662a9b293ce0e9fb50303",
+        "747d6633c5f15eac087231efd007037c",
+        "2502",
     ),
-]
+}
 
-# 容器头：4 字节。出现它就说明后面跟着 AES-256-CBC 密文。
+# 默认容器头（param.pdt.enc 用这个）
 CIPHER_MAGIC = b"\x25\x06\x00\x00"
+
+# 所有已知容器头，用于「找密文」时逐个试
+ALL_MAGICS = tuple(CIPHER_KEYS)
+
+# 兼容旧名字：外部代码/文档里可能还在引用 FIRMWARE_KEYS
+FIRMWARE_KEYS = [
+    (r".*", CIPHER_KEYS[CIPHER_MAGIC][0], CIPHER_KEYS[CIPHER_MAGIC][1], "2506 容器"),
+]
 
 # param.pdt.enc 的大小（用于在 rootfs 镜像里定位）
 PARAM_PDT_ENC_SIZE = 1770484
@@ -103,8 +126,8 @@ PARAM_PDT_ENC_SIZE = 1770484
 def describe_keys():
     """返回密钥表的可读说明（给 --selftest / 日志用）。"""
     lines = []
-    for pat, k2, iv2, note in FIRMWARE_KEYS:
-        lines.append(f"  {pat:<16} k2={k2[:16]}… iv2={iv2[:8]}…  {note}")
+    for magic, (k2, iv2, note) in CIPHER_KEYS.items():
+        lines.append(f"  {magic.hex()}  k2={k2[:16]}… iv2={iv2[:8]}…  {note} 容器")
     return "\n".join(lines)
 
 
@@ -290,10 +313,29 @@ def _py_aes_cbc_decrypt(key, iv, data):
 # ---------------------------------------------------------------------------
 # 解密
 # ---------------------------------------------------------------------------
-def decrypt_value(cipher_hex, key_hex, iv_hex, has_magic=True):
+def _split_magic(raw):
+    """把 `25060000<hex>` 拆成 (容器头, 密文 body)。
+
+    不是已知容器头就抛 DecryptError —— **绝不要把密文当明文返回**，
+    那会让调用方拿着 34 个 hex 字符去登录，白白烧掉认证次数。
+    """
+    if len(raw) < 4:
+        raise DecryptError(f"太短，不是密文：{raw.hex()}")
+    magic = raw[:4]
+    if magic not in CIPHER_KEYS:
+        raise DecryptError(
+            f"不认识的容器头 {magic.hex()}（已知："
+            + "、".join(m.hex() for m in CIPHER_KEYS)
+            + "）"
+        )
+    return magic, raw[4:]
+
+
+def decrypt_value(cipher_hex, key_hex=None, iv_hex=None, has_magic=True):
     """解一个 UCI 里形如 `25060000<32 位 hex>` 的值。
 
-    has_magic=False 时把整个输入都当密文（用于直接喂二进制）。
+    key_hex/iv_hex 不传就按容器头自动选（推荐）。has_magic=False 时把整个
+    输入都当密文，此时必须显式给 key/iv。
     """
     if isinstance(cipher_hex, str):
         cipher_hex = cipher_hex.strip().strip("'\"")
@@ -307,43 +349,42 @@ def decrypt_value(cipher_hex, key_hex, iv_hex, has_magic=True):
         raw = bytes(cipher_hex)
 
     if has_magic:
-        if not raw.startswith(CIPHER_MAGIC):
-            raise DecryptError(
-                f"密文没有 `25060000` 容器头（实际开头 {raw[:4].hex()}），格式不对"
-            )
-        raw = raw[4:]
+        magic, body = _split_magic(raw)
+        if key_hex is None:
+            key_hex, iv_hex, _ = CIPHER_KEYS[magic]
+    else:
+        body = raw
+        if key_hex is None or iv_hex is None:
+            raise DecryptError("has_magic=False 时必须显式给 key 和 iv")
 
-    key = bytes.fromhex(key_hex)
-    iv = bytes.fromhex(iv_hex)
-    return _aes_cbc_decrypt(key, iv, raw)
+    return _aes_cbc_decrypt(bytes.fromhex(key_hex), bytes.fromhex(iv_hex), body)
 
 
 def decrypt_value_auto(cipher_hex, firmware_version=""):
-    """按固件版本挑密钥解密，返回 (明文, 命中的说明)。
+    """按容器头挑密钥解密，返回 (明文, 命中的说明)。
 
-    明文按 UTF-8 解；解不出来（说明密钥不对）就抛 DecryptError。
+    firmware_version 参数只为向后兼容保留 —— 密钥是按容器头选的，与固件
+    版本无关（同一版本的不同省份预置包会用不同容器）。
     """
-    last_err = None
-    for pat, k2, iv2, note in FIRMWARE_KEYS:
-        if firmware_version and not re.search(pat, firmware_version):
-            continue
+    if isinstance(cipher_hex, str):
+        s = cipher_hex.strip().strip("'\"")
         try:
-            raw = decrypt_value(cipher_hex, k2, iv2)
-        except DecryptError as exc:
-            last_err = exc
-            continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            last_err = DecryptError("解出来不是 UTF-8（密钥不对）")
-            continue
-        # 明文应当是可见字符（密码、数字、开关）
-        if text and all(0x20 <= ord(ch) <= 0x7E for ch in text):
-            return text, note
-        last_err = DecryptError(f"解出来的不是可打印文本：{text[:20]!r}")
-    raise last_err or DecryptError(
-        f"固件版本 {firmware_version!r} 不在密钥表里（已知：{describe_keys()}）"
-    )
+            raw = bytes.fromhex(s[2:] if s[:2].lower() == "0x" else s)
+        except ValueError:
+            raise DecryptError(f"不是合法的十六进制串：{cipher_hex[:40]}…")
+    else:
+        raw = bytes(cipher_hex)
+
+    magic, body = _split_magic(raw)
+    key_hex, iv_hex, note = CIPHER_KEYS[magic]
+    plain = _aes_cbc_decrypt(bytes.fromhex(key_hex), bytes.fromhex(iv_hex), body)
+    try:
+        text = plain.decode("utf-8")
+    except UnicodeDecodeError:
+        raise DecryptError(f"容器头 {magic.hex()} 解出来不是 UTF-8（密钥不对）")
+    if text and not all(0x20 <= ord(ch) <= 0x7E for ch in text):
+        raise DecryptError(f"容器头 {magic.hex()} 解出来的不是可打印文本：{text[:20]!r}")
+    return text, f"{note} 容器"
 
 
 # ---------------------------------------------------------------------------
@@ -352,28 +393,34 @@ def decrypt_value_auto(cipher_hex, firmware_version=""):
 def find_param_pdt_enc(blob):
     """在 rootfs 镜像（squashfs）或裸文件里定位 param.pdt.enc。
 
-    做法：找 `25060000` 开头、且按已知密钥能解出 XML 的那一段。
+    做法：找任意**已知容器头**开头、且按对应密钥能解出 XML 的那一段。
     返回 (起始偏移, 内容) 或 (None, None)。
 
     为什么不按固定偏移：不同机型的 rootfs 布局不一样，硬编码偏移必然翻车。
+    为什么试所有容器头：同一份固件里 `param.pdt.enc` 是 2506，但个别省份的
+    `pre_usrconfig_conf` 是 2502，两者都要能认。
     """
     body_len = PARAM_PDT_ENC_SIZE - 4
-    pos = 0
-    while True:
-        pos = blob.find(CIPHER_MAGIC, pos)
-        if pos < 0:
-            return None, None
-        chunk = blob[pos:pos + PARAM_PDT_ENC_SIZE]
-        if len(chunk) >= 4 + 16:
-            # 只试第一块，能解出 `<!--` 就认定命中（省时间）
-            try:
-                head = decrypt_value(chunk[:4 + 16], FIRMWARE_KEYS[0][1], FIRMWARE_KEYS[0][2])
-                if head.startswith(b"<!--") or head.startswith(b"<?xml") or head.startswith(b"<"):
-                    if len(chunk) >= body_len:
+    for magic in ALL_MAGICS:
+        pos = 0
+        while True:
+            pos = blob.find(magic, pos)
+            if pos < 0:
+                break
+            chunk = blob[pos:pos + PARAM_PDT_ENC_SIZE]
+            if len(chunk) >= 4 + 16:
+                # 只试第一块，能解出 `<!--` 就认定命中（省时间）
+                try:
+                    key_hex, iv_hex, _ = CIPHER_KEYS[magic]
+                    head = _aes_cbc_decrypt(
+                        bytes.fromhex(key_hex), bytes.fromhex(iv_hex), chunk[4:4 + 16]
+                    )
+                    if head.startswith(b"<") and len(chunk) >= body_len:
                         return pos, chunk[:PARAM_PDT_ENC_SIZE]
-            except DecryptError:
-                pass
-        pos += 1
+                except (DecryptError, Exception):
+                    pass
+            pos += 1
+    return None, None
 
 
 _TAG_RE = re.compile(rb"<(/?)(obj|trf|param)\b([^>]*?)(/?)>", re.S)
@@ -426,14 +473,15 @@ def extract_telnet_info(param_bytes, firmware_version=""):
     缺失的键不会出现。**只认 X_CT-COM_ServiceManage 下的那一份**，因为
     Lan. 和 TelnetAccount.0. 下的是别的用途。
     """
-    if not param_bytes.startswith(CIPHER_MAGIC):
+    if len(param_bytes) < 4 or param_bytes[:4] not in CIPHER_KEYS:
         # 允许直接喂 UCI 文本（pre_usrconfig_conf）
         return _from_uci_text(param_bytes, firmware_version)
 
-    key = _pick_key(firmware_version)
+    magic = param_bytes[:4]
+    key = _pick_key(firmware_version, magic)
     plain = _aes_cbc_decrypt(key[0], key[1], param_bytes[4:])
     if not plain.lstrip().startswith(b"<"):
-        raise DecryptError("param.pdt.enc 解密后不是 XML（密钥或版本不对）")
+        raise DecryptError("param.pdt.enc 解密后不是 XML（密钥或容器头不对）")
     params = parse_param_xml(plain)
 
     wanted = ("TelnetUserName", "TelnetPassword", "TelnetEnable", "TelnetPort")
@@ -462,7 +510,12 @@ def extract_telnet_info(param_bytes, firmware_version=""):
 
 
 def _from_uci_text(data, firmware_version=""):
-    """从 `option TelnetPassword '2506…'` 这种 UCI 文本里抽并解密。"""
+    """从 `option TelnetPassword '2506…'` 这种 UCI 文本里抽并解密。
+
+    **解不了就不要给值**。早期版本在解密失败时把密文原样写进结果，导致
+    调用方拿着 34 个 hex 字符当密码去登录 telnet —— 白白消耗认证次数，
+    而且看起来像「密码找错了」。
+    """
     if isinstance(data, bytes):
         text = data.decode("utf-8", "replace")
     else:
@@ -470,14 +523,33 @@ def _from_uci_text(data, firmware_version=""):
     out = {}
     for m in re.finditer(r"option\s+(Telnet\w+)\s+'([^']*)'", text):
         name, val = m.group(1), m.group(2)
-        if val.startswith("25060000"):
+        if not val:
+            continue
+        if _looks_like_cipher(val):
             try:
                 out[name] = decrypt_value_auto(val, firmware_version)[0]
             except DecryptError:
-                out[name] = val  # 解不了就原样给出，方便人工判断
+                # 有密文但解不了：宁可缺这个键，也不要返回密文
+                continue
         else:
             out[name] = val
     return out
+
+
+def _looks_like_cipher(val):
+    """判断一个 UCI 值是不是密文（已知容器头 + 纯 hex）。"""
+    if not isinstance(val, str):
+        return False
+    s = val.strip().strip("'\"")
+    if s[:2].lower() == "0x":
+        s = s[2:]
+    if len(s) < 36 or len(s) % 2:
+        return False
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError:
+        return False
+    return raw[:4] in CIPHER_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -576,14 +648,191 @@ def verify_md5_crypt(password, hashed):
         return False
 
 
+# ---------------------------------------------------------------------------
+# sha256-crypt（$5$）—— 烽火 HG5585F 实际用的就是这个，不是 md5-crypt
+# ---------------------------------------------------------------------------
+# 实测设备上的 `/var/tel_passwd` 是：
+#   telnetadmin:$5$fh$bg0a9bk15PO3Ngg4aEbKF9SeXypmpk.pEpClSXdumcB:100:100:...
+# 早期版本只实现了 md5-crypt，遇到 `$5$` 直接放弃比对，于是退化成「在 telnet
+# 会话里一个个试」—— 正是用户指出的问题。这里补上 sha256-crypt。
+#
+# 算法出自 Ulrich Drepper 的公开规范（SHA-crypt），与 `openssl passwd -5`
+# 逐字节一致（已用 `openssl passwd -5 -salt fh 'FH-nE7jA%5m'` 交叉验证）。
+_SHA_CRYPT_ALPHABET = (
+    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
+
+
+def _sha_crypt_b64(b2, b1, b0, n):
+    """SHA-crypt 的 64 进制编码（低位先出）。"""
+    w = (b2 << 16) | (b1 << 8) | b0
+    out = []
+    for _ in range(n):
+        out.append(_SHA_CRYPT_ALPHABET[w & 0x3F])
+        w >>= 6
+    return "".join(out)
+
+
+def sha256_crypt(password, salt, rounds=5000):
+    """生成 `$5$salt$hash`。rounds 为 5000 时省略 rounds= 段（默认值）。"""
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    if isinstance(salt, str):
+        salt = salt.encode("utf-8")
+    salt = salt[:16]
+
+    # B = SHA256(password + salt + password)
+    b = hashlib.sha256(password + salt + password).digest()
+
+    # A = SHA256(password + salt + <B 重复到 len(password)> + <按位选的 B/password>)
+    ctx = hashlib.sha256()
+    ctx.update(password)
+    ctx.update(salt)
+    cnt = len(password)
+    while cnt > 32:
+        ctx.update(b)
+        cnt -= 32
+    ctx.update(b[:cnt])
+    cnt = len(password)
+    while cnt:
+        ctx.update(b if (cnt & 1) else password)
+        cnt >>= 1
+    a = ctx.digest()
+
+    # DP = SHA256(password * len(password))，再按 len(password) 截成 P
+    dp = hashlib.sha256()
+    for _ in range(len(password)):
+        dp.update(password)
+    dp = dp.digest()
+    p = b""
+    cnt = len(password)
+    while cnt > 32:
+        p += dp
+        cnt -= 32
+    p += dp[:cnt]
+
+    # DS = SHA256(salt * (16 + A[0]))，再按 len(salt) 截成 S
+    ds = hashlib.sha256()
+    for _ in range(16 + a[0]):
+        ds.update(salt)
+    ds = ds.digest()
+    s = b""
+    cnt = len(salt)
+    while cnt > 32:
+        s += ds
+        cnt -= 32
+    s += ds[:cnt]
+
+    # 5000 轮
+    c = a
+    for r in range(rounds):
+        h = hashlib.sha256()
+        h.update(p if (r & 1) else c)
+        if r % 3:
+            h.update(s)
+        if r % 7:
+            h.update(p)
+        h.update(c if (r & 1) else p)
+        c = h.digest()
+
+    out = (
+        _sha_crypt_b64(c[0], c[10], c[20], 4)
+        + _sha_crypt_b64(c[21], c[1], c[11], 4)
+        + _sha_crypt_b64(c[12], c[22], c[2], 4)
+        + _sha_crypt_b64(c[3], c[13], c[23], 4)
+        + _sha_crypt_b64(c[24], c[4], c[14], 4)
+        + _sha_crypt_b64(c[15], c[25], c[5], 4)
+        + _sha_crypt_b64(c[6], c[16], c[26], 4)
+        + _sha_crypt_b64(c[27], c[7], c[17], 4)
+        + _sha_crypt_b64(c[18], c[28], c[8], 4)
+        + _sha_crypt_b64(c[9], c[19], c[29], 4)
+        + _sha_crypt_b64(b"\0"[0], c[31], c[30], 3)
+    )
+    prefix = "$5$" if rounds == 5000 else f"$5$rounds={rounds}$"
+    return f"{prefix}{salt.decode('utf-8', 'replace')}${out}"
+
+
+def verify_sha256_crypt(password, hashed):
+    """候选密码与 `$5$[rounds=N$]salt$hash` 是否匹配。"""
+    if not hashed or not isinstance(hashed, str) or not hashed.startswith("$5$"):
+        return False
+    parts = hashed.split("$")
+    # ["", "5", (rounds=N), salt, hash]
+    if len(parts) < 4:
+        return False
+    rounds = 5000
+    idx = 2
+    if parts[2].startswith("rounds="):
+        try:
+            rounds = int(parts[2][7:])
+        except ValueError:
+            return False
+        idx = 3
+    if len(parts) < idx + 2:
+        return False
+    salt = parts[idx]
+    try:
+        return sha256_crypt(password, salt, rounds) == hashed
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def verify_password_hash(password, hashed):
+    """按哈希类型自动选择实现（`$1$` md5-crypt / `$5$` sha256-crypt）。"""
+    if not hashed or not isinstance(hashed, str):
+        return False
+    if hashed.startswith("$1$"):
+        return verify_md5_crypt(password, hashed)
+    if hashed.startswith("$5$"):
+        return verify_sha256_crypt(password, hashed)
+    return False
+
+
+def _unwrap_tar(data):
+    """如果 data 是 tar 包，返回里面第一个普通文件的内容；否则原样返回。
+
+    **为什么必须处理**：`fh_tool` 的 `DownloadFile` 接口返回的不是裸文件，
+    而是把文件打成 tar 再吐出来（实测 `/var/tel_passwd` 的响应开头就是
+    `var/tel_passwd\\0\\0…0000644…ustar`）。早期版本直接把 tar 字节丢给
+    parse_passwd_file，解析出的「用户名」是整个 tar 头，哈希是垃圾。
+    """
+    if len(data) < 512:
+        return data
+    # tar 的 magic 在偏移 257：`ustar`
+    if data[257:262] != b"ustar":
+        return data
+    pos = 0
+    while pos + 512 <= len(data):
+        header = data[pos:pos + 512]
+        if header[:512] == b"\0" * 512:
+            break
+        name = header[:100].split(b"\0", 1)[0]
+        try:
+            size = int(header[124:136].split(b"\0", 1)[0].strip() or b"0", 8)
+        except ValueError:
+            break
+        typeflag = header[156:157]
+        body_start = pos + 512
+        body = data[body_start:body_start + size]
+        if typeflag in (b"0", b"\0", b"7") and body:
+            return body
+        pos = body_start + ((size + 511) // 512) * 512
+        if not name:
+            break
+    return data
+
+
 def parse_passwd_file(data):
     """解析 `用户名:哈希:uid:gid:备注:家目录:shell` 格式的 passwd 文件。
 
     设备上 `/var/tel_passwd`、`/var/telWan_passwd`、`/var/telsu` 都是这个格式，
     由 telnetd / protocolmgr 在启动时按配置生成。返回 {用户名: 哈希}，
     哈希不是 `$` 开头的（明文或 `x`）也会原样带出，交给调用方判断。
+
+    自动处理 tar 包装（见 `_unwrap_tar`）。
     """
     if isinstance(data, bytes):
+        data = _unwrap_tar(data)
         text = data.decode("utf-8", "replace")
     else:
         text = data or ""
@@ -597,7 +846,8 @@ def parse_passwd_file(data):
             continue
         user = parts[0].strip()
         hashed = parts[1].strip()
-        if user:
+        # 用户名必须是正常标识符，否则就是没剥干净的 tar 头
+        if user and re.fullmatch(r"[A-Za-z0-9_.@-]{1,32}", user):
             out[user] = hashed
     return out
 
@@ -607,29 +857,34 @@ def match_password_hash(candidates, hashed):
 
     这一步纯本地计算，**不消耗 telnet 认证次数** —— 比在 telnet 会话里
     一个个试要安全得多（烽火连续错 3 次就锁）。
+
+    支持 `$1$`（md5-crypt）与 `$5$`（sha256-crypt）。烽火 HG5585F 实测用
+    的是 `$5$fh$…`，早期版本只认 `$1$`，于是白白退化成在线试密码。
     """
     if not hashed:
         return None, "没有可用的哈希"
-    if not hashed.startswith("$1$"):
-        # $5$/$6$（sha256/sha512-crypt）或明文，本模块不算
-        if hashed.startswith("$"):
-            return None, f"哈希类型不是 md5-crypt（{hashed.split('$')[1]}），无法本地比对"
-        if hashed and hashed not in ("x", "*", "!"):
+    if not hashed.startswith("$"):
+        if hashed not in ("x", "*", "!"):
             return hashed, "密码文件里就是明文"
         return None, "密码文件里没有可用哈希"
-    for cand in candidates:
-        if cand and verify_md5_crypt(cand, hashed):
-            return cand, "候选密码与设备上的哈希一致"
-    return None, f"试了 {len(candidates)} 个候选密码，都与设备上的哈希对不上"
+    kind = hashed.split("$")[1]
+    if kind not in ("1", "5"):
+        return None, f"哈希类型 ${kind}$ 暂不支持本地比对（只做了 md5-crypt / sha256-crypt）"
+    tried = [c for c in candidates if c]
+    for cand in tried:
+        if verify_password_hash(cand, hashed):
+            return cand, "候选密码与设备上的哈希一致（本地比对，未连 telnet）"
+    return None, f"试了 {len(tried)} 个候选密码，都与设备上的哈希对不上"
 
 
-def _pick_key(firmware_version):
-    for pat, k2, iv2, note in FIRMWARE_KEYS:
-        if not firmware_version or re.search(pat, firmware_version):
-            return bytes.fromhex(k2), bytes.fromhex(iv2)
-    raise DecryptError(
-        f"固件版本 {firmware_version!r} 不在密钥表里：\n{describe_keys()}"
-    )
+def _pick_key(firmware_version="", magic=CIPHER_MAGIC):
+    """按容器头取 (key, iv)。firmware_version 参数已废弃，仅为兼容保留。"""
+    if magic not in CIPHER_KEYS:
+        raise DecryptError(
+            f"不认识的容器头 {magic.hex()}：\n{describe_keys()}"
+        )
+    k2, iv2, _ = CIPHER_KEYS[magic]
+    return bytes.fromhex(k2), bytes.fromhex(iv2)
 
 
 # ---------------------------------------------------------------------------
@@ -652,7 +907,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     blob = open(sys.argv[1], "rb").read()
-    if blob.startswith(CIPHER_MAGIC) and len(blob) > 1000:
+    if len(blob) >= 4 and blob[:4] in CIPHER_KEYS and len(blob) > 1000:
         info = extract_telnet_info(blob)
         for k, v in info.items():
             print(f"{k} = {v}")
