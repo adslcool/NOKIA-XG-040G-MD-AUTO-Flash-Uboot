@@ -97,9 +97,15 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
 
    > ⚠️ **第 1 步用 `preloader.bin`，不要用 `firstblock.bin`**
    >
-   > `firstblock.bin` 是整块 boot 区（BL2 + 分区表）的原样镜像，刷入
-   > 成功率明显偏低，很容易变砖。`preloader.bin` 只写 BL2 这一段，
-   > 偏移和长度都由 U-Boot 侧处理，容错空间大得多。
+   > 两者的区别是**写入 NAND 的位置**不同（据 uboot-an758x 作者的说明）：
+   >
+   > - `*-firstblock.bin` —— 从 NAND **偏移 0x0** 开始整块写入，会把开头
+   >   那 `0x800` 字节一起覆盖；
+   > - `*-preloader.bin` —— **前 `0x800` 字节保持擦除态**，只从 NAND
+   >   偏移 `0x800` 写入 BL2。
+   >
+   > firstblock 要连带覆盖开头 `0x800`，而各机型那一段的内容并不一样，
+   > 写错就起不来 —— 这才是它成砖率高得多的原因。
    >
    > 除非你明确知道自己在做什么、且有 XMODEM 救砖条件，否则别碰
    > `firstblock.bin`。
@@ -356,8 +362,9 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
 
 备份完之后剩下的步骤在**它自己的网页里**完成（本工具不代劳，那是它的界面）：
 
-- 上传对应机型的 `preloader.bin`（**不要用 `firstblock.bin`** —— 整块 boot 区
-  镜像，实测成砖率高），以及 AN758x U-Boot 的 `bl31-u-boot.fip`；
+- 上传对应机型的 `preloader.bin`（**不要用 `firstblock.bin`** —— 它从 NAND
+  偏移 0x0 整块写入、会覆盖开头 0x800，实测成砖率高），以及 AN758x U-Boot 的
+  `bl31-u-boot.fip`；
 - 重启后访问 `http://192.168.0.1/` 继续安装；首次进入恢复页可能要约一分钟。
 
 > ⚠️ 刷写过程中**绝对不能断电**，重启后**必须**访问 `192.168.0.1` 继续完成
@@ -449,6 +456,34 @@ fh_tool_call(ip, mac, api_payload("GetAdminAccount"), 8.0, port=8080)
 ```
 
 （本工具目前只用它开 Telnet；读账号的能力留着备用。）
+
+### 闪存：SPI NAND，颗粒可能因批次不同
+
+HG5585F CT 用的是 **SPI NAND**，不是 eMMC、也不是 NOR。真机上
+`/sys/class/mtd/mtd0` 报出来的几何参数：
+
+| 项目 | 值 |
+|---|---|
+| `type` | `nand` |
+| `writesize`（页大小） | 2048 字节 |
+| `oobsize`（OOB） | 64 字节 |
+| `subpagesize` | 2048 字节 |
+| `erasesize`（擦除块） | 131072 字节 = 128 KiB |
+
+容量 **256 MiB**：从 stock2ubi 页面上各分区的物理偏移推出来 —— 最后一个带
+物理偏移的分区（`userlocalct`）结束于 `0x0EC00000` = 236 MiB，留 20 MiB 余量
+正好填满 256 MiB。`mtd15 apps` / `mtd16 userdata` 没有独立物理偏移，它们是
+`mtd10 apps`（120 MiB）里的 UBI 卷，两个加起来 114.44 MiB，放得下。
+
+> ⚠️ **同型号的不同批次，板上焊的闪存未必是同一颗。**
+> 本工具在真机上只能读到「是 NAND、128 KiB 擦除块」这些参数，
+> **读不到厂商和型号** —— 这版固件把 SPI NAND 驱动编进了内核，
+> dmesg 里没有芯片探测日志，也没有 `spi-nand` 的 sysfs 节点。
+>
+> 所以选 U-Boot / OpenWrt 镜像时，请按你自己这台机器的闪存类型选。
+> 拿不准就拆开看芯片丝印，或者先确认镜像说明里的擦除块大小与设备一致 ——
+> 擦除块对不上会写不进去，甚至起不来。擦除块是 128 KiB 还是 4 KiB
+> （NOR）是最容易区分的一项。
 
 ### 烽火不走 tcboot
 

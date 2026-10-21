@@ -484,9 +484,9 @@ class App:
              "上传 preloader.bin，点「上传并写入」。\n"
              "    文件名形如 an7581-fiberhome-hg5585f-ct-preloader.bin。\n"
              "    ⚠️ 建议用 preloader.bin，不要用 firstblock.bin ——\n"
-             "    firstblock.bin 是整块 boot 区的原样镜像（含分区表），\n"
-             "    写错偏移或版本不匹配就起不来，实测成砖率高得多；\n"
-             "    preloader.bin 只写 BL2 这一段，容错空间大。"),
+             "    两者写入位置不同：preloader.bin 从 NAND 偏移 0x800 写入，\n"
+             "    前 0x800 字节保持擦除态；firstblock.bin 从偏移 0x0 写入，\n"
+             "    会把开头那 0x800 字节一起覆盖。实测 firstblock 成砖率高。"),
             ("2", "重建 UBI",
              "点「重建 UBI」。这一步会清空 UBI 里的全部数据，属于正常现象 ——\n"
              "    首次刷机必须先重建，否则后面的分区写不进去。\n"
@@ -535,6 +535,13 @@ class App:
         # firstblock.bin 的专项警告（用户反馈：这个成功率低、容易砖）。
         # 单独一块而不是塞进第 1 步里，是因为它和第 1 步的「必砖红线」不是
         # 一个性质：红线是「不刷就砖」，这里是「刷了也可能砖，所以别用」。
+        #
+        # 两者的真正区别是写入位置（据 uboot-an758x 作者的说明）：
+        #   firstblock.bin → 从 NAND 偏移 0x0 写，覆盖开头 0x800 字节；
+        #   preloader.bin  → 保留开头 0x800 擦除态，从偏移 0x800 写。
+        # 换句话说 firstblock 是把 BL2 连同它前面的 0x800 一起整块覆盖，
+        # preloader 只补 BL2 那一段。前 0x800 是分区表/引导参数之类的位置，
+        # 各机型不一致，所以 firstblock 更容易写坏 —— 这才是成砖率高的原因。
         fb = tk.Frame(steps, bg="#fff8e1",
                       highlightbackground="#e0c060", highlightthickness=1)
         fb.pack(fill="x", pady=(6, 0))
@@ -542,10 +549,13 @@ class App:
             fb, bg="#fff8e1", fg="#8a6d00", justify="left", anchor="w",
             wraplength=920, font=("", 10, "bold"),
             text="⚠️ 第 1 步请用 preloader.bin，不要用 firstblock.bin\n"
-                 "firstblock.bin 是整块 boot 区（BL2 + 分区表）的原样镜像，"
-                 "刷入成功率明显偏低，很容易变砖。\n"
-                 "preloader.bin 只写 BL2 这一段，偏移和长度都由 U-Boot 侧处理，"
-                 "容错空间大得多。\n"
+                 "两者的区别是写入 NAND 的位置不同：\n"
+                 "  · firstblock.bin —— 从 NAND 偏移 0x0 开始整块写入，"
+                 "会把开头那 0x800 字节一起覆盖；\n"
+                 "  · preloader.bin  —— 前 0x800 字节保持擦除态，"
+                 "只从 NAND 偏移 0x800 写入 BL2。\n"
+                 "firstblock 要连带覆盖开头 0x800，而那一段各机型不一样，"
+                 "写错就起不来，实测成砖率高得多。\n"
                  "除非你明确知道自己在做什么、且有 XMODEM 救砖条件，否则别碰 firstblock.bin。"
         ).pack(anchor="w", padx=8, pady=6)
 
@@ -557,6 +567,29 @@ class App:
                  "3 MiB 的 JFFS2/UBI 容器，不能直接上传。\n"
                  "务必用这台机器自己的备份，不要用别人的。"
         ).pack(anchor="w", pady=(2, 0))
+
+        # ===== 闪存批次提醒 =====
+        # 用户 m11298：读不到品牌名就算了，页面上提醒「不同批次闪存可能不一样」。
+        # 之所以要提醒：U-Boot / OpenWrt 镜像是按闪存类型（SPI NAND / NOR / eMMC）
+        # 和擦除块大小编的，同型号不同批次的料可能换过。本工具在真机上只能读到
+        # 「是 NAND、128 KiB 擦除块」，读不到厂商 ID（这版固件没暴露 spi-nand 节点）。
+        flash_note = tk.Frame(steps, bg="#eef4fb",
+                              highlightbackground="#7aa7d9",
+                              highlightthickness=1)
+        flash_note.pack(fill="x", pady=(6, 0))
+        tk.Label(
+            flash_note, bg="#eef4fb", fg="#1b4a7a", justify="left", anchor="w",
+            wraplength=920, font=("", 10),
+            text="ℹ️ 闪存颗粒可能因批次不同而不同\n"
+                 "同型号 HG5585F 的不同批次，板上焊的 SPI NAND 未必是同一颗 —— "
+                 "容量、页大小、擦除块大小都可能不一样。\n"
+                 "本工具只能读到「是 NAND、128 KiB 擦除块」这些参数，"
+                 "读不到厂商和型号（固件没暴露）。\n"
+                 "所以选 U-Boot / OpenWrt 镜像时，请按你自己这台机器的闪存类型选；"
+                 "拿不准就先拆开看芯片丝印，\n"
+                 "或者刷之前先确认镜像说明里的擦除块大小与设备一致"
+                 "（擦除块对不上会写不进去，甚至起不来）。"
+        ).pack(anchor="w", padx=8, pady=6)
 
         # ===== 断电警告（常驻，红底）=====
         # 用户明确要求：这条必须写在界面上，因为教程没写清楚导致群里很多人变砖。
