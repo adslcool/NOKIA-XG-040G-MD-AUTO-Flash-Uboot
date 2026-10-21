@@ -75,6 +75,9 @@ datas = [
     # fhfactory.py 是 flash.py 在烽火备份后动态 import 的（生成 1 MiB factory），
     # 静态分析看不到，必须作为数据文件一起打包。
     ("fhfactory.py", "."),
+    # fhdecrypt.py 同理：只有 telnet 密码被拒时才动态 import（解 param.pdt.enc）。
+    # 它是「密码找回」兜底通道的核心，漏打就等于这条功能在 exe 里不存在。
+    ("fhdecrypt.py", "."),
 ]
 # tcboot.bin 是可选的：存在就一起打包，作为「找不到外部文件」时的兜底
 if os.path.isfile("tcboot.bin"):

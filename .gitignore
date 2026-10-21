@@ -68,3 +68,5 @@ _decwork
 _fw_rootfs
 _webjs
 esp32c3_ttl_bridge
+# telnet 密码找回时临时下载的配置文件
+_recover/

@@ -164,6 +164,83 @@ class FhClient:
         """读注册结果（运营商开通状态）。"""
         return self.call("GetResult")
 
+    def telnet_info(self):
+        """读 telnet 账号/密码/开关（无需登录）。
+
+        设备端函数名是 `GetTelnetInfo`（在 `/fhrom/bin/webs` 的 API 表里，
+        与 `GetDevInfo`/`GetAdminAccount` 并列）。这是**找回 telnet 密码的
+        首选通道**：只要 8080 能通、MAC 读得到，就不需要先登录 telnet。
+
+        返回的字段名在不同固件上可能是 telnetuser/telnetpwd、
+        TelnetUserName/TelnetPassword、username/password 等，所以这里
+        按大小写不敏感的方式找键，并且保留原始响应供调用方兜底。
+        """
+        raw = self.call("GetTelnetInfo") or {}
+        out = {"raw": raw}
+        lowered = {str(k).lower(): v for k, v in raw.items()}
+
+        def pick(*names):
+            for name in names:
+                if name.lower() in lowered:
+                    val = lowered[name.lower()]
+                    if val not in (None, ""):
+                        return str(val)
+            return ""
+
+        out["username"] = pick("telnetuser", "telnetusername", "username", "user", "account")
+        out["password"] = pick("telnetpwd", "telnetpassword", "password", "pwd", "passwd")
+        out["enabled"] = pick("telnetenable", "enabled", "enable", "telnet")
+        out["port"] = pick("telnetport", "port")
+        return out
+
+    def download_file(self, file_name, dest, timeout=120.0):
+        """让设备打包并导出一个文件，直接落到本地 `dest`（无需登录）。
+
+        设备端是 `DownloadFile`：先回一个 `Dowloadurl`（固件里就是这么拼错的，
+        不是笔误），再 GET 那个 URL 拿数据。fh_tool 的下载端点不需要认证，
+        所以这一步同样绕开了 telnet。
+
+        返回 {"path": 本地路径, "bytes": 字节数, "url": 下载地址}。
+        """
+        import os
+        import urllib.request
+
+        resp = self.call("DownloadFile", {"fileName": file_name}) or {}
+        # 固件把字段拼成 Dowloadurl；三个拼法都兼容，别只认一个。
+        url = ""
+        lowered = {str(k).lower(): v for k, v in resp.items()}
+        for key in ("dowloadurl", "downloadurl", "url"):
+            val = lowered.get(key)
+            if isinstance(val, str) and val:
+                url = val
+                break
+        if not url:
+            raise FhToolUnavailable(
+                f"DownloadFile 没有返回下载地址（响应：{resp}）"
+            )
+        if url.startswith("/"):
+            url = f"http://{self.ip}:{self.port}{url}"
+        elif not url.startswith(("http://", "https://")):
+            url = f"http://{self.ip}:{self.port}/{url}"
+
+        dest = str(dest)
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        total = 0
+        try:
+            with urllib.request.urlopen(url, timeout=float(timeout)) as r, \
+                    open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    total += len(chunk)
+        except Exception as e:  # noqa: BLE001
+            raise FhToolUnavailable(f"下载 {url} 失败：{type(e).__name__}: {e}") from e
+        return {"path": dest, "bytes": total, "url": url}
+
 
 # ---------- telnet / su ----------
 def telnet_shell(ip, username, password, port=23, timeout=10.0):

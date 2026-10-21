@@ -1306,6 +1306,19 @@ def self_test():
         problems.append(f"缺模块 fhfactory: {type(e).__name__}: {e}")
         print(f"  [✗] fhfactory — {e}")
 
+    # 2b-3. 烽火 telnet 密码找回（认证被拒时的兜底通道）
+    try:
+        import fhdecrypt
+        # 真解一次固定向量，确认密钥表和 AES 实现都真的能跑
+        probe = fhdecrypt.decrypt_value_auto(
+            "2506000049ECBE32C8DE760F0E960B0F0A53953F")[0]
+        if probe != "FH-nE7jA%5m":
+            raise RuntimeError(f"固定向量解出来是 {probe!r}，应为 FH-nE7jA%5m")
+        print("  [✓] fhdecrypt（telnet 密码找回可用，固定向量校验通过）")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"缺模块 fhdecrypt: {type(e).__name__}: {e}")
+        print(f"  [✗] fhdecrypt — {e}")
+
     # 2c. 机型注册表
     try:
         import models

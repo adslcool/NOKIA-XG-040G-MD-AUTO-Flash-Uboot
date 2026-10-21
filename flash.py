@@ -108,6 +108,13 @@ AUTO_REBOOT_ON_LOGIN_FAIL = True   # False 则失败后直接退出，不自动�
 AUTO_REBOOT_MAX = 1                # 整个登录过程最多自动重启几次
 AUTO_REBOOT_ASK = False            # True 则每次重启前询问（命令行交互用）
 
+# --- 运行时找回的 telnet 密码 ---
+# 认证被拒后，烽火可以走「免登录」通道（fh_tool 的 GetTelnetInfo，或下载
+# param.pdt.enc 后本地解密）取回真实密码。取回的密码只放在这个变量里、
+# **不写 config.ini** —— 用户没确认过的密码不该被持久化。
+# 它会被 _password_candidates() 排到候选第一位。
+_RECOVERED_PASSWORD = ""
+
 # --- TTL / 串口控制台（拆机接线，不依赖网络）---
 # 与 telnet 路线的关系：两条路**二选一**。走 TTL 时完全不需要开 Telnet/FTP、
 # 不需要超级密码、不需要设备联网 —— 串口线接上就是 root shell。
@@ -583,7 +590,13 @@ def _web_login_with_retry(retry_seconds=None, purpose="操作"):
     HTTP 200 + "用户xxx已经登录，请稍后重试"。此时先等待会话超时释放
     （retry_seconds，默认 WEB_SESSION_RETRY），仍不通则询问是否重启光猫
     （重启会清掉所有网页会话，是最可靠的解法）。
+
+    **只有贝尔（移动版）有这条单会话限制。** 烽火的网页后端允许多会话，
+    实测从不会返回「已经登录」；所以烽火机型不做长等待、也不弹重启询问 ——
+    真登录失败就是账号密码不对，等 40 分钟毫无意义，只会让用户以为卡死。
     """
+    if MODEL_FAMILY == "fh":
+        retry_seconds = 0
     if retry_seconds is None:
         retry_seconds = WEB_SESSION_RETRY
     deadline = time.time() + retry_seconds
@@ -600,6 +613,11 @@ def _web_login_with_retry(retry_seconds=None, purpose="操作"):
 
         # 登录未通过（HTTP 200 + 登录页）
         if "已经登录" in body:
+            if MODEL_FAMILY == "fh":
+                # 理论上到不了这里；真到了说明这版烽火固件也加了限制。
+                print(f"[!] 超级账号 {SUPER_USER} 当前已在网页在线（单会话限制）。")
+                print("[!] 烽火机型一般没有这条限制，请先退出光猫网页上的登录，再重试。")
+                break
             remain = max(0, int(deadline - time.time()))
             if remain > 0:
                 print(f"[!] 超级账号 {SUPER_USER} 当前已在网页在线（单会话限制），"
@@ -1102,26 +1120,40 @@ def detect_telnet_username():
     m = re.search(r"""val\(\s*["']([A-Za-z0-9_\-]+)["']\s*\)""", page)
     return m.group(1) if m else None
 
+
+
+def _prepend_password_candidate(password):
+    """把运行时找回的密码插到候选最前面（本次进程内生效）。
+
+    为什么用全局而不用返回值：`_telnet_login_once` 内部自己调
+    `_password_candidates()`，把找回的密码存进这个全局最省改动，也不会
+    污染 config.ini —— 用户没确认过的密码不该被写进配置文件。
+    """
+    if not password:
+        return
+    global _RECOVERED_PASSWORD
+    _RECOVERED_PASSWORD = password
+
+
 def _password_candidates():
     """按可能性排序返回 telnet 密码候选（去重、去空）。
 
-    为什么需要「候选」而不是一个密码：烽火的 telnet 密码有**两种流传版本**，
-    都和固件里 `pre_usrconfig_conf` 的 `TelnetPassword` 密文有关：
-
-      密文 2506000049ECBE32C8DE760F0E960B0F0A53953F
-        → 用设备自己的 libfhcfg 解出来 = FH-nE7jA%5m（固定值，不含 MAC）
-
-    另一派教程说密码是「固定值 + MAC 后 6 位」，在别的固件版本/机型上确实
-    见过。两种都不能排除，所以按顺序试：
-
-      1. 机型档案里的固定密码（烽火 FH-nE7jA%5m / 贝尔 j3ba73@8）；
-      2. 用户显式配置的 PASSWORD（可能被 config.ini 改过）；
-      3. 固定密码 + MAC 后 6 位（仅 telnet_password_from_mac 或用户开了
-         TELNET_PASSWORD_TRY_MAC_SUFFIX 时才试）。
-
-    顺序有讲究：认证失败累计 3 次就锁 300 秒，所以必须先试**证据最强**的
-    那个（固件解出来的固定值），再试流传版本。
+    运行时找回的密码（`_RECOVERED_PASSWORD`，见 _try_recover_telnet_password）
+    永远排第一：它是从设备自己的配置里解出来的，比任何猜测都可靠。
     """
+    out = []
+
+    def _add(p):
+        if p and p not in out:
+            out.append(p)
+
+    # 0) 运行时从设备取回的真实密码（最高优先级）
+    _add(_RECOVERED_PASSWORD)
+    return out + _password_candidates_static()
+
+
+def _password_candidates_static():
+    """静态候选（机型固定值 / 用户配置 / MAC 后缀变体）。"""
     out = []
 
     def _add(p):
@@ -1304,6 +1336,125 @@ def _should_reboot(reason, rebooted, ask=True):
     return True
 
 
+def _try_recover_telnet_password(quiet=False):
+    """telnet 密码被拒时，用**免登录**通道把真实密码找回来。
+
+    为什么需要它：烽火的 telnet 密码存在固件的 `param.pdt.enc` 里，网上流传的
+    默认值只对没改过密码的机器有效。装维改过密码后，用户就陷入死锁 ——
+    要读配置得先有 telnet，要有 telnet 得先知道密码。而烽火在 8080 上开了
+    一个**无需登录**的 fh_tool RPC（密钥就是 MAC，MAC 又能免认证读到），
+    正好可以打破这个死锁。
+
+    两条路，按代价从低到高：
+      1. `GetTelnetInfo` —— 设备直接把 telnet 账号密码吐出来（最省事）；
+      2. `DownloadFile` 取配置文件 + 本地解密（GetTelnetInfo 不存在时兜底）。
+
+    返回 {"username":…, "password":…, "source":…}，找不到返回 None。
+    **不消耗 telnet 认证次数**，所以放在「已经被拒」之后调用是安全的。
+    """
+    if MODEL_FAMILY != "fh":
+        return None
+    try:
+        import fhtool
+    except Exception as e:  # noqa: BLE001
+        if not quiet:
+            print(f"[!] 无法加载 fhtool（{type(e).__name__}: {e}），跳过密码找回")
+        return None
+    if not fhtool.available():
+        if not quiet:
+            print("[!] 没装 fh_tool-cli，无法用免登录通道找回 telnet 密码")
+        return None
+
+    ensure_model_mac()
+    mac = MODEL_MAC
+    if not mac:
+        if not quiet:
+            print("[!] 读不到光猫 MAC，免登录通道用不了（密钥由 MAC 派生）")
+        return None
+
+    if not quiet:
+        print()
+        print("[*] telnet 密码被拒，尝试用免登录通道找回真实密码 ...")
+    client = fhtool.FhClient(ROUTER_IP, mac, port=WEB_PORT)
+
+    # ---- 路线 1：GetTelnetInfo ----
+    try:
+        info = client.telnet_info()
+    except Exception as e:  # noqa: BLE001
+        info = {}
+        if not quiet:
+            print(f"[!] GetTelnetInfo 不可用（{type(e).__name__}: {e}）")
+    pwd = (info or {}).get("password") or ""
+    if pwd:
+        if not quiet:
+            print(f"[✓] 设备直接返回了 telnet 凭据（GetTelnetInfo）")
+        return {
+            "username": (info.get("username") or "").strip(),
+            "password": pwd,
+            "source": "GetTelnetInfo",
+        }
+
+    # ---- 路线 2：下载配置 + 本地解密 ----
+    try:
+        import fhdecrypt
+    except Exception as e:  # noqa: BLE001
+        if not quiet:
+            print(f"[!] 无法加载 fhdecrypt（{type(e).__name__}: {e}），跳过解密兜底")
+        return None
+
+    # 设备上可能存在的几个候选路径。param.pdt.enc 是参数总库；
+    # pre_usrconfig_conf 是省份预置包（明文 UCI，带密文 telnet 密码）。
+    candidates = (
+        "/fhrom/fhconf/param.pdt.enc",
+        "/fhconf/param.pdt.enc",
+        "/fhdata/pre_usrconfig_conf",
+        "/fhconf/usrconfig_conf",
+    )
+    tmpdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_recover")
+    for remote in candidates:
+        local = os.path.join(tmpdir, os.path.basename(remote))
+        try:
+            got = client.download_file(remote, local)
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                print(f"[*] 取 {remote} 失败（{type(e).__name__}），换下一个")
+            continue
+        size = got.get("bytes") or 0
+        if size < 16:
+            continue
+        if not quiet:
+            print(f"[*] 已取回 {remote}（{size} 字节），本地解密 ...")
+        try:
+            blob = open(local, "rb").read()
+            # 先按整文件当 param.pdt.enc 试，再按「镜像里搜一段」试
+            try:
+                found = fhdecrypt.extract_telnet_info(blob)
+            except Exception:  # noqa: BLE001
+                _off, chunk = fhdecrypt.find_param_pdt_enc(blob)
+                if chunk is None:
+                    found = {}
+                else:
+                    found = fhdecrypt.extract_telnet_info(chunk)
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                print(f"[!] 解密 {remote} 失败（{type(e).__name__}: {e}）")
+            continue
+        pwd = (found or {}).get("TelnetPassword") or ""
+        if pwd:
+            if not quiet:
+                print(f"[✓] 从 {remote} 解出了 telnet 密码")
+            return {
+                "username": (found.get("TelnetUserName") or "").strip(),
+                "password": pwd,
+                "source": f"解密 {os.path.basename(remote)}",
+            }
+
+    if not quiet:
+        print("[!] 免登录通道也没找回密码（固件可能不支持这两个接口）")
+        print("[!] 可以手动导出配置后运行：python3 fhdecrypt.py <文件>")
+    return None
+
+
 def telnet_login(reenter_only=False, _su_retried=False):
     """Telnet 登录并 su 到 root，返回 Telnet 连接对象
 
@@ -1343,10 +1494,27 @@ def telnet_login(reenter_only=False, _su_retried=False):
 
     # 2) 逐个尝试登录；失败则按策略自动重启光猫后重试
     rebooted = 0
+    recovered = False
     while True:
         tn, who, reason = _telnet_login_once(candidates)
         if tn is not None:
             break
+        # 认证被拒时，先别急着重启：烽火有一条**免登录**通道能取回真实密码。
+        # 重启只能清零失败计数，密码还是错的；找回密码才是真正解决问题。
+        # 注意只在 auth 时走这条路（conn/lockout 是限流或已锁，取密码没用）。
+        if reason == "auth" and not recovered:
+            recovered = True
+            got = _try_recover_telnet_password()
+            if got and got.get("password"):
+                if got.get("username"):
+                    u = got["username"]
+                    if u not in candidates:
+                        candidates.insert(0, u)
+                # 把找回的密码插到候选最前面，下一次登录第一发就用它
+                _prepend_password_candidate(got["password"])
+                print(f"[✓] 已取回 telnet 凭据（来源：{got['source']}），"
+                      f"账号 {got.get('username') or '（沿用当前）'}，立即重试 ...")
+                continue
         if not _should_reboot(reason, rebooted):
             if reason == "conn":
                 print("[!] 无法与 telnetd 建立可交互会话。")
@@ -2935,6 +3103,7 @@ def _load_model_globals(model_key=None):
     global MODEL_PASSWORD, MODEL_PASSWORD_PREFIX
     global MODEL_TELNET_PASSWORD_FROM_MAC, MODEL_SU_PASSWORD
     global MODEL_SU_PASSWORD_PREFIX, TELNET_PASSWORD_TRY_MAC_SUFFIX
+    global MODEL_FAMILY
     try:
         import models as models_mod
     except Exception:

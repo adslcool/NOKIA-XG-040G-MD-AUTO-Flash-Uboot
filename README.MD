@@ -691,6 +691,42 @@ python3 flash.py --reboot
 另外请确认配置区的 `PASSWORD` 是**光猫底部铭牌上的 telnet 密码**，
 它和网页超级密码 `aDm8H%MdA` 不是同一个。
 
+### 提示 telnet 密码错误（烽火：程序会自动找回）
+
+烽火的 telnet 密码存在固件里，网上流传的 `FH-nE7jA%5m` 只对**没改过密码**
+的机器有效。装维改过密码后就会陷入死锁：要读配置得先有 telnet，要有 telnet
+得先知道密码。
+
+这个工具会自动打破死锁 —— 认证被拒后，走烽火在 8080 端口上那个**无需登录**
+的 `fh_tool` 接口（密钥就是 MAC，而 MAC 又能免认证读到）取回真实密码：
+
+1. `GetTelnetInfo`：设备直接把 telnet 账号密码吐出来（最省事）；
+2. 取不到时，用 `DownloadFile` 把 `/fhrom/fhconf/param.pdt.enc` 拉回本地，
+   用固件里的 AES 工作密钥解密（`fhdecrypt.py`）。
+
+取回的密码只用于**本次运行**，不会写进 `config.ini`。整个过程不消耗 telnet
+认证次数，所以放在「已经被拒」之后调用是安全的。
+
+也可以手动离线解密 —— 拿到配置文件（`param.pdt.enc`，或任意包含它的
+rootfs 分区镜像）后：
+
+```bash
+python3 fhdecrypt.py /path/to/param.pdt.enc
+# TelnetUserName = telnetadmin
+# TelnetPassword = FH-nE7jA%5m
+# TelnetEnable = 0
+# TelnetPort = 23
+```
+
+只解一个密文值也行：
+
+```bash
+python3 fhdecrypt.py --value 2506000049ECBE32C8DE760F0E960B0F0A53953F
+```
+
+> 密钥表按**固件版本**索引（目前验证过 `V4.20.M5000`）。换固件后密钥可能不同，
+> 表里没命中时会明确报错而不是给出乱码 —— 猜错比报错更糟。
+
 ### 提示"获取 root 权限失败"
 备份和刷写都需要 root 权限，非 root 下 busybox 会直接拒绝执行 dd：
 
