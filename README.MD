@@ -81,7 +81,7 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
 
    | 顺序 | 网页里的按钮 | 要上传/操作的文件 |
    |---|---|---|
-   | ① | 刷写 BL2 | `preloader.bin`（或 `firstblock.bin`） |
+   | ① | 刷写 BL2 | `preloader.bin`（**别用 `firstblock.bin`**，见下方黄框） |
    | ② | 重建 UBI | 直接点，会清空 UBI 内数据 |
    | ③ | 板级数据 | 本工具自动生成的 `factory-1m.bin`（1.0 MiB） |
    | ④ | 刷写 U-Boot | `bl31-u-boot.fip` |
@@ -94,6 +94,15 @@ telnet 密码（`FH-nE7jA%5m`）和提权密码（`Fh@`+MAC后6位）都由程�
    >
    > 重建 UBI 只清 UBI 里的数据，不动 preloader 和 U-Boot；但这两块
    > boot 区一旦缺失，重建后再也起不来，只能拆机接串口用 XMODEM 救砖。
+
+   > ⚠️ **第 1 步用 `preloader.bin`，不要用 `firstblock.bin`**
+   >
+   > `firstblock.bin` 是整块 boot 区（BL2 + 分区表）的原样镜像，刷入
+   > 成功率明显偏低，很容易变砖。`preloader.bin` 只写 BL2 这一段，
+   > 偏移和长度都由 U-Boot 侧处理，容错空间大得多。
+   >
+   > 除非你明确知道自己在做什么、且有 XMODEM 救砖条件，否则别碰
+   > `firstblock.bin`。
 
    **第 ③ 步用 `factory-1m.bin`，不是 `mtd13_factory.bin`。** 原厂的
    factory 分区是 3 MiB 的 JFFS2/UBI 容器，U-Boot 那一栏只认 1.0 MiB。
@@ -347,8 +356,8 @@ python3 flash.py --reboot          # 只重启光猫（清掉网页会话 / teln
 
 备份完之后剩下的步骤在**它自己的网页里**完成（本工具不代劳，那是它的界面）：
 
-- 上传对应机型的 `preloader.bin` 或 `firstblock.bin`，以及 AN758x U-Boot 的
-  `bl31-u-boot.fip`；
+- 上传对应机型的 `preloader.bin`（**不要用 `firstblock.bin`** —— 整块 boot 区
+  镜像，实测成砖率高），以及 AN758x U-Boot 的 `bl31-u-boot.fip`；
 - 重启后访问 `http://192.168.0.1/` 继续安装；首次进入恢复页可能要约一分钟。
 
 > ⚠️ 刷写过程中**绝对不能断电**，重启后**必须**访问 `192.168.0.1` 继续完成
@@ -535,7 +544,7 @@ python3 serial_shell.py
        「④ 运行 stock2ubi 刷 U-Boot」）。它会把
        [an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi)
        上传到光猫后台跑起来，再打开它的网页，在里面备份分区、上传
-       `preloader.bin`/`firstblock.bin` 和
+       `preloader.bin`（别用 `firstblock.bin`）和
        [uboot-an758x](https://github.com/pbs05/uboot-an758x) 的
        `bl31-u-boot.fip`，重启后访问 `http://192.168.0.1/` 继续安装。
        详见上面的「`--mode stock2ubi`」一节。

@@ -481,8 +481,12 @@ class App:
 
         step_text = (
             ("1", "刷写 BL2",
-             "上传 preloader.bin（或 firstblock.bin），点「上传并写入」。\n"
-             "    文件名形如 an7581-fiberhome-hg5585f-ct-preloader.bin。"),
+             "上传 preloader.bin，点「上传并写入」。\n"
+             "    文件名形如 an7581-fiberhome-hg5585f-ct-preloader.bin。\n"
+             "    ⚠️ 建议用 preloader.bin，不要用 firstblock.bin ——\n"
+             "    firstblock.bin 是整块 boot 区的原样镜像（含分区表），\n"
+             "    写错偏移或版本不匹配就起不来，实测成砖率高得多；\n"
+             "    preloader.bin 只写 BL2 这一段，容错空间大。"),
             ("2", "重建 UBI",
              "点「重建 UBI」。这一步会清空 UBI 里的全部数据，属于正常现象 ——\n"
              "    首次刷机必须先重建，否则后面的分区写不进去。\n"
@@ -526,6 +530,23 @@ class App:
                  "重建 UBI 只清 UBI 里的数据，不动 preloader 和 U-Boot；"
                  "但这两块 boot 区一旦缺失，\n重建后再也起不来，"
                  "只能拆机接串口用 XMODEM 救砖。"
+        ).pack(anchor="w", padx=8, pady=6)
+
+        # firstblock.bin 的专项警告（用户反馈：这个成功率低、容易砖）。
+        # 单独一块而不是塞进第 1 步里，是因为它和第 1 步的「必砖红线」不是
+        # 一个性质：红线是「不刷就砖」，这里是「刷了也可能砖，所以别用」。
+        fb = tk.Frame(steps, bg="#fff8e1",
+                      highlightbackground="#e0c060", highlightthickness=1)
+        fb.pack(fill="x", pady=(6, 0))
+        tk.Label(
+            fb, bg="#fff8e1", fg="#8a6d00", justify="left", anchor="w",
+            wraplength=920, font=("", 10, "bold"),
+            text="⚠️ 第 1 步请用 preloader.bin，不要用 firstblock.bin\n"
+                 "firstblock.bin 是整块 boot 区（BL2 + 分区表）的原样镜像，"
+                 "刷入成功率明显偏低，很容易变砖。\n"
+                 "preloader.bin 只写 BL2 这一段，偏移和长度都由 U-Boot 侧处理，"
+                 "容错空间大得多。\n"
+                 "除非你明确知道自己在做什么、且有 XMODEM 救砖条件，否则别碰 firstblock.bin。"
         ).pack(anchor="w", padx=8, pady=6)
 
         ttk.Label(
@@ -1157,7 +1178,9 @@ class App:
                 "启动后本工具会先把全部分区自动备份下来（带 SHA256 清单，\n"
                 "同一台设备已有完整备份则跳过），再打开它的网页。\n\n"
                 "网页里的刷写顺序（顺序错了会变砖）：\n"
-                "  ① 刷写 BL2 —— 上传 preloader.bin / firstblock.bin\n"
+                "  ① 刷写 BL2 —— 上传 preloader.bin\n"
+                "     （别用 firstblock.bin：整块 boot 区原样镜像，\n"
+                "      成功率低、很容易砖，除非你有 XMODEM 救砖条件）\n"
                 "  ② 重建 UBI（首次刷机必须先做）\n"
                 "  ③ 板级数据 —— 上传刚生成的 factory-1m.bin（1.0 MiB，\n"
                 "     不是 mtd13_factory.bin）\n"
@@ -1210,6 +1233,8 @@ class App:
                 "并写 device.json 清单（stock2ubi 自己不做校验）；\n"
                 "  3. 备份完打开它的网页，你在网页里按这个顺序刷：\n"
                 "       ① 刷写 BL2 —— 上传 preloader.bin\n"
+                "          （别用 firstblock.bin：整块 boot 区原样镜像，\n"
+                "           成功率低、很容易砖）\n"
                 "       ② 重建 UBI（会清空 UBI 内数据，首次刷机必须先做）\n"
                 "       ③ 板级数据 —— 上传 factory-1m.bin（1.0 MiB，自动生成）\n"
                 "       ④ 刷写 U-Boot —— 上传 bl31-u-boot.fip\n"

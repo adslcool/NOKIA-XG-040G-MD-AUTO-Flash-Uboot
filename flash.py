@@ -224,7 +224,8 @@ FLASH_VERIFY_INTERVAL = 5        # 每次回读之间的间隔秒数
 
 # --- an758x-stock2ubi（--mode stock2ubi）---
 # 它把设备变成一台临时 HTTP 服务器（默认 0.0.0.0:3333），网页里备份分区、
-# 上传 preloader.bin/firstblock.bin + bl31-u-boot.fip，然后重启进 U-Boot 恢复页。
+# 上传 preloader.bin + bl31-u-boot.fip，然后重启进 U-Boot 恢复页。
+# 注意：不要用 firstblock.bin —— 整块 boot 区镜像，实测成砖率高。
 # 本工具只负责「上传 + 后台运行 + 等端口起来」，刷写动作在它的网页里做。
 STOCK2UBI_FILE = "an758x-stock2ubi"   # 放在本工具同目录；也支持放到 dist/ 一起发
 STOCK2UBI_REMOTE = "/tmp/an758x-stock2ubi"
@@ -2887,7 +2888,8 @@ def run_stock2ubi(tn, local_ip, filepath, ignore_kernel=False,
 
     这一步只负责「把工具送上去并跑起来」。真正刷 U-Boot 的动作在它自己的网页里
     （http://设备IP:3333/）：先备份需要保留的分区，再上传对应机型的
-    preloader.bin / firstblock.bin 和 AN758x U-Boot 的 bl31-u-boot.fip，
+    preloader.bin（不要用 firstblock.bin，成砖率高）和 AN758x U-Boot 的
+    bl31-u-boot.fip，
     重启后访问 http://192.168.0.1/ 继续安装。本工具不代劳那部分 ——
     那是 pbs05/an758x-stock2ubi 的界面，由它自己实现最可靠。
 
@@ -2994,7 +2996,8 @@ def run_stock2ubi(tn, local_ip, filepath, ignore_kernel=False,
     url = f"http://{ROUTER_IP}:{STOCK2UBI_PORT}/"
     print(f"\n[✓] an758x-stock2ubi 已在设备后台运行。")
     print(f"    打开 {url} 继续（分区备份由本工具另外完成，不用在网页里点下载）：")
-    print(f"    ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
+    print(f"    ① 刷写 BL2      —— 上传 preloader.bin（不要用 firstblock.bin）")
+    print(f"       ⚠️ firstblock.bin 是整块 boot 区镜像，成功率低、很容易砖")
     print(f"    ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
     print(f"       ⚠️ 没刷 preloader 就重建 UBI = 必砖")
     print(f"    ③ 板级数据      —— 上传 backup_*/{FACTORY_1M_NAME}（1.0 MiB，非 mtd13）")
@@ -3231,7 +3234,8 @@ def run_flow(args, confirm_flash=None):
         if backup_dir_used:
             print(f"    备份目录: {backup_dir_used}")
         print(f"    打开 {url} ，按下面的顺序刷（顺序错了会变砖）：")
-        print(f"      ① 刷写 BL2      —— 上传 preloader.bin / firstblock.bin")
+        print(f"      ① 刷写 BL2      —— 上传 preloader.bin（不要用 firstblock.bin）")
+        print(f"         ⚠️ firstblock.bin 是整块 boot 区镜像，成功率低、很容易砖")
         print(f"      ② 重建 UBI      —— 首次刷机必须先做，会清空 UBI 内数据")
         print(f"         ⚠️ 没刷 preloader 就重建 UBI = 必砖")
         print(f"      ③ 板级数据      —— 上传 backup_*/{FACTORY_1M_NAME}（1.0 MiB，非 mtd13）")
