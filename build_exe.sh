@@ -25,7 +25,7 @@ PY_EXE_WIN='C:\Py311\python.exe'     # 装好后的解释器路径
 # （pyinstaller 的 import 名是 PyInstaller，写错了会每次都被判定缺失、
 # 反复重装，实测踩过）。
 PKGS=("telnetlib3:telnetlib3" "pyinstaller:PyInstaller")
-EXE_NAME="XG-040G-MD工具.exe"
+EXE_NAME="xe-pon-flash-toolkit.exe"
 SELFTEST_TIMEOUT=180                 # exe 自检超时（秒）
 
 # Python 安装包下载源：中科大镜像优先，失败回退官网

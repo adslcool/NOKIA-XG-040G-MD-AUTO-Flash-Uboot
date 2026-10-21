@@ -4,7 +4,7 @@
 用法（在装了 pyinstaller 的 Windows Python 下）：
     pyinstaller --clean --noconfirm build_exe.spec
 
-产物：dist/XG-040G-MD工具.exe（单文件、无控制台窗口）
+产物：dist/xe-pon-flash-toolkit.exe（单文件、无控制台窗口）
       用户把 tcboot.bin 放到 exe 同目录即可刷机。
 
 ⚠️ 关键点：flash.py 是**运行时用 importlib 动态加载**的（gui.py 里
@@ -42,12 +42,12 @@ _VERSION_INFO = f"""VSVersionInfo(
     StringFileInfo([
       StringTable('080404B0', [
         StringStruct('CompanyName', 'xe5700'),
-        StringStruct('FileDescription', 'XG-040G-MD 光猫工具'),
+        StringStruct('FileDescription', '邪恶的光猫刷机工具箱'),
         StringStruct('FileVersion', '{VERSION}'),
-        StringStruct('InternalName', 'XG-040G-MD工具'),
+        StringStruct('InternalName', 'xe-pon-flash-toolkit'),
         StringStruct('LegalCopyright', 'WTFPL v2'),
-        StringStruct('OriginalFilename', 'XG-040G-MD工具.exe'),
-        StringStruct('ProductName', 'XG-040G-MD 光猫工具'),
+        StringStruct('OriginalFilename', 'xe-pon-flash-toolkit.exe'),
+        StringStruct('ProductName', '邪恶的光猫刷机工具箱'),
         StringStruct('ProductVersion', '{VERSION}'),
         StringStruct('Comments', 'https://github.com/{REPO}'),
       ])
@@ -173,7 +173,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="XG-040G-MD工具",
+    name="xe-pon-flash-toolkit",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

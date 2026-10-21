@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XG-040G-MD 光猫工具 · 图形界面
+"""邪恶的光猫刷机工具箱 · 图形界面
 
 只用 Python 标准库 tkinter，不需要额外安装依赖（Windows 版 exe 也是这套）。
 
@@ -26,7 +26,7 @@ try:
 except Exception:  # 打包漏了 version.py 时不能让 GUI 起不来
     VERSION = "0.0.0"
 
-APP_TITLE = "XG-040G-MD 光猫工具"
+APP_TITLE = "邪恶的光猫刷机工具箱"
 APP_TITLE_FULL = f"{APP_TITLE} v{VERSION}"
 
 
@@ -1229,7 +1229,7 @@ def self_test():
     漏掉某个模块要等真正用到处才炸（曾漏掉 http.server，备份时才报错）。
     这里把所有依赖提前导一遍，早暴露问题。
 
-    命令行运行：`XG-040G-MD工具.exe --selftest`（GUI 版也能跑，会弹窗显示）
+    命令行运行：`xe-pon-flash-toolkit.exe --selftest`（GUI 版也能跑，会弹窗显示）
     """
     problems = []
     print(f"{APP_TITLE_FULL}")

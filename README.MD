@@ -1,8 +1,10 @@
-# 贝尔XG-040G-MD 一键刷入使用教程
+# 邪恶的光猫刷机工具箱（xe-pon-flash-toolkit）
+
+贝尔 XG-040G-MD / XG-140G-MD 与烽火 HG5585F 电信版的一键刷机教程。
 
 ## 图形界面（推荐新手用）
 
-不想敲命令的话，直接运行 `gui.py`（Windows 上跑打包好的 `XG-040G-MD工具.exe`）：
+不想敲命令的话，直接运行 `gui.py`（Windows 上跑打包好的 `xe-pon-flash-toolkit.exe`）：
 
 ```bash
 python3 gui.py
@@ -149,19 +151,25 @@ allow_flash = false
 ### Windows 免安装版
 
 从 [Releases](https://github.com/xe5700/xg-040g-md-auto-flash-uboot/releases)
-下载 `XG-040G-MD.zip`（已含 exe 和 tcboot.bin），解压即用。
-也可以只下 `XG-040G-MD.exe` 单文件程序（约 15MB），**不需要装 Python**：
+下载 `xe-pon-flash-toolkit-v<版本>.zip`（已含 exe、tcboot.bin、an758x-stock2ubi），
+解压即用。也可以只下 `xe-pon-flash-toolkit-v<版本>.exe` 单文件程序（约 20MB），
+**不需要装 Python**：
 
-1. 把 `XG-040G-MD.exe`（解压出来是 `XG-040G-MD工具.exe`）和 `tcboot.bin`
-   放在**同一个目录**；
+1. 把 exe 和 `tcboot.bin`、`an758x-stock2ubi` 放在**同一个目录**
+   （zip 解开就已经是这个布局）；
 2. 双击运行；
 3. 界面里填好账号密码，点「保存配置」，会在同目录生成 `config.ini`。
 
-> Release 上的附件名是 ASCII（`XG-040G-MD.zip` / `XG-040G-MD.exe`），
-> 因为 GitHub 上传时会**直接删掉文件名里的非 ASCII 字符**。zip 里面
-> 仍然是中文名 `XG-040G-MD工具.exe`，解压后看到的名字不变。
-> 附件 `SHA256SUMS.txt` 里写的也是这两个 ASCII 名，和下载到的文件名一致，
-> 所以 `sha256sum -c SHA256SUMS.txt` 能直接校验通过。
+> 附件名带版本号（`xe-pon-flash-toolkit-v2.2.0.exe` 这种），因为 Release
+> 页面上会同时躺着多个 tag 的包，同名文件下载到本地根本分不清哪个是哪个。
+> 名字全用 ASCII，是因为 GitHub 上传时会**直接删掉文件名里的非 ASCII
+> 字符**，附件名和 `SHA256SUMS.txt` 里写的就会对不上，`sha256sum -c`
+> 必然报「没有那个文件或目录」。
+>
+> `an758x-stock2ubi` 不在本仓库里维护，打包时由 `package_release.py`
+> 通过 GitHub API 从 [pbs05/an758x-stock2ubi](https://github.com/pbs05/an758x-stock2ubi/releases)
+> 取最新 Release 的二进制塞进 zip。它是别人维护的 aarch64 静态 ELF，
+> 跟着上游走才不会过期。
 
 注意：
 - exe 是 64 位 Windows 程序（Win7 及以上）；
@@ -175,7 +183,7 @@ allow_flash = false
 可以跑自检确认：
 
 ```bat
-XG-040G-MD工具.exe --selftest
+xe-pon-flash-toolkit.exe --selftest
 ```
 
 它会把依赖逐个导入一遍、加载一次 `flash.py`，结果同时写到程序目录的
@@ -184,7 +192,7 @@ XG-040G-MD工具.exe --selftest
 加 `--quiet` 可以让它失败时也不弹窗（CI / 无人值守用，只看退出码和日志）：
 
 ```bat
-XG-040G-MD工具.exe --selftest --quiet
+xe-pon-flash-toolkit.exe --selftest --quiet
 ```
 
 ### 关于「恢复出厂设置」提示
@@ -198,7 +206,7 @@ reset 键 20 秒以上，让超级管理员密码回到默认值（贝尔是
 需要超级密码是默认值。
 
 ## 系统要求
-- **Windows**：直接跑 `dist/XG-040G-MD工具.exe`，无需安装任何东西（见上文
+- **Windows**：直接跑 `dist/xe-pon-flash-toolkit.exe`，无需安装任何东西（见上文
   「Windows 免安装版」）。
 - **Linux / WSL / MSYS2**：用 `python3 flash.py`（命令行）或 `python3 gui.py`
   （图形界面）。图形界面需要系统带 tkinter，多数发行版装 `python3-tk` 即可。
@@ -772,14 +780,15 @@ su user_ftp                     → Password: 输入 j3ba73@8
 ```
 
 脚本会复用 `_winbuild/` 里已有的 wine 前缀和 Windows Python（该目录不入库，
-但**不要删**——重装很慢）。产物为 `dist/XG-040G-MD工具.exe`，
-并顺带用 `package_release.py` 打成 `dist/XG-040G-MD一键刷机.zip`
-（exe + tcboot.bin，就是 Release 上提供的那个包）。
+但**不要删**——重装很慢）。产物为 `dist/xe-pon-flash-toolkit.exe`，
+并顺带用 `package_release.py` 打成 `dist/xe-pon-flash-toolkit-v<版本>.zip`
+（exe + tcboot.bin + an758x-stock2ubi，就是 Release 上提供的那个包）。
 
-`package_release.py` 还会额外生成 `dist/release/`：里面是 ASCII 名的副本
-（`XG-040G-MD.zip` / `XG-040G-MD.exe`）和与之一致的 `SHA256SUMS.txt`，
-专门给 GitHub Release 用。原因见上文「Windows 免安装版」的说明 ——
-GitHub 会删掉附件名里的非 ASCII 字符，与其让它隐式改名，不如自己先定名。
+`package_release.py` 还会额外生成 `dist/release/`：里面是带版本号、
+纯 ASCII 名的副本（`xe-pon-flash-toolkit-v<版本>.zip` / `.exe`）和与之
+一致的 `SHA256SUMS.txt`，专门给 GitHub Release 用。原因见上文
+「Windows 免安装版」的说明 —— GitHub 会删掉附件名里的非 ASCII 字符，
+与其让它隐式改名，不如自己先定名。
 
 > 改了 `flash.py` 必须重新跑 `build_exe.sh`：它是运行时动态加载的，
 > 直接替换 exe 同目录的 `flash.py` 也能生效，但想让改动进 exe 就得重打包。
@@ -851,7 +860,7 @@ python3 changelog.py --range      # 只打印用到的提交区间，便于排�
 PyInstaller 打包 → 检查产物大小 → 跑 `--selftest --quiet` 确认依赖齐全 →
 用 `package_release.py` 打成 zip 并生成 Release 附件 →
 上传 Artifact → 用 `changelog.py` 生成更新日志 → 创建 Release 并附上
-`XG-040G-MD.zip`、`XG-040G-MD.exe` 与 `SHA256SUMS.txt`。
+`xe-pon-flash-toolkit-v<版本>.zip`、`.exe` 与 `SHA256SUMS.txt`。
 
 > 如果 tag 对应的 Release 已存在（例如想修一个发错的 Release），
 > CI 会改成**更新说明 + 覆盖附件**，而不是失败。
