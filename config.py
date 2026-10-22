@@ -211,6 +211,10 @@ def apply_model(cfg, flash, model=None):
     flash.SUPPORTS_STOCK2UBI = m.supports_stock2ubi
     flash.SUPPORTS_UBOOT_FLASH = m.supports_uboot_flash
     flash.TELNET_ENABLE_MODE = m.telnet_enable
+    # 备份通道也要按机型重置。漏了这一行会出现：逛过烽火 tab 再回贝尔，
+    # BACKUP_TRANSPORT 还留着 "stock2ubi"，于是贝尔备份去连 3333 端口，
+    # 而贝尔设备上根本没有 an758x-stock2ubi 在跑，备份必然失败。
+    flash.BACKUP_TRANSPORT = m.backup_transport
     flash.MODEL_MAC = cfg.get("device", "mac", fallback="").strip()
     # 试「固定值+MAC后6位」这种流传写法（烽火 True，贝尔 False）
     flash.TELNET_PASSWORD_TRY_MAC_SUFFIX = m.telnet_password_try_mac_suffix
